@@ -31,6 +31,8 @@
   .dot:nth-child(2) { animation-delay: .2s } .dot:nth-child(3) { animation-delay: .4s }
   @keyframes blink { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
   input[type="date"] { min-height: 48px; }
+  @keyframes slide { from { transform: translateX(-100%) } to { transform: translateX(300%) } }
+  .indeterminate { animation: slide 1.2s ease-in-out infinite; }
 </style>
 </head>
 <body class="font-sans text-slate-900 antialiased">
@@ -78,6 +80,63 @@ const sumBy = (list, type) => list.filter(t => t.type === type).reduce((s, t) =>
 const cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const fmtQty = n => Number(n).toLocaleString('id-ID', { maximumFractionDigits: 2 });
 const toNum = s => parseFloat(String(s).replace(',', '.')) || 0;
+
+/* =========================================================
+   Sambungan ke backend (FastAPI). Kalau file dibuka langsung tanpa
+   server, aplikasi tetap berjalan sebagai prototipe dengan data contoh.
+   ========================================================= */
+const API = { enabled: false, ai: false, demo: false, token: null };
+const storage = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) { /* mode privat */ } },
+};
+async function api(path, { method = 'GET', body, form } = {}) {
+  const headers = {};
+  if (API.token) headers.Authorization = `Bearer ${API.token}`;
+  let payload;
+  if (form) payload = form;
+  else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
+  let res;
+  try { res = await fetch('/api' + path, { method, headers, body: payload }); }
+  catch (e) { const err = new Error('Tidak tersambung ke server. Periksa internet.'); err.code = 'offline'; throw err; }
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* bukan JSON */ }
+  if (!res.ok) {
+    const d = data && data.detail;
+    const err = new Error(d && d.message ? d.message : Array.isArray(d) ? 'Isian belum lengkap atau tidak valid.' : 'Server sedang bermasalah.');
+    err.status = res.status; err.code = d && d.code;
+    throw err;
+  }
+  return data;
+}
+async function detectBackend() {
+  if (!/^https?:$/.test(location.protocol)) return false;
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) return false;
+    const h = await res.json();
+    Object.assign(API, { enabled: true, ai: !!h.ai, demo: !!h.demo });
+    return true;
+  } catch (e) { return false; }
+}
+// Perkecil foto sebelum dikirim ke AI (foto HP bisa > 5 MB); gambar contoh yang kecil diperbesar
+function imageToJpeg(src, max = 1600) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const big = Math.max(img.naturalWidth, img.naturalHeight);
+      const scale = img.naturalWidth < 600 ? 2.5 : Math.min(1, max / big);
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => b ? resolve(b) : reject(new Error('Foto tidak bisa diproses')), 'image/jpeg', 0.85);
+    };
+    img.onerror = () => reject(new Error('Foto tidak bisa dibuka'));
+    img.src = src;
+  });
+}
 
 /* =========================================================
    Data contoh: usaha "Jualans", cilok goreng
@@ -723,12 +782,25 @@ function Landing({ go }) {
   );
 }
 
-function Register({ go, setUser }) {
+function FormError({ text }) {
+  return text ? <p role="alert" className="text-sm text-rose-800 bg-rose-50 border border-rose-200 rounded-xl p-3">{text}</p> : null;
+}
+
+function Register({ go, setUser, onAuth }) {
   const [f, setF] = useState({ name: '', contact: '', pass: '' });
-  const submit = e => {
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async e => {
     e.preventDefault();
-    setUser({ name: f.name.trim() || 'Rina', contact: f.contact.trim() || '0812-3456-7890' });
-    go('setup');
+    if (!API.enabled) {
+      setUser({ name: f.name.trim() || 'Rina', contact: f.contact.trim() || '0812-3456-7890' });
+      return go('setup');
+    }
+    if (!f.name.trim() || !f.contact.trim()) return setErr('Isi nama dan nomor HP atau email dulu.');
+    if (f.pass.length < 6) return setErr('Kata sandi minimal 6 huruf atau angka.');
+    setBusy(true); setErr('');
+    try { onAuth(await api('/auth/register', { method: 'POST', body: { name: f.name.trim(), contact: f.contact.trim(), password: f.pass } })); }
+    catch (e2) { setErr(e2.message); setBusy(false); }
   };
   return (
     <AuthShell>
@@ -744,7 +816,8 @@ function Register({ go, setUser }) {
         <Field label="Kata sandi" hint="Minimal 6 huruf atau angka">
           <PasswordInput value={f.pass} onChange={v => setF({ ...f, pass: v })} placeholder="Buat kata sandi" />
         </Field>
-        <button className={`${BTN_PRIMARY} w-full`} type="submit">Daftar</button>
+        <FormError text={err} />
+        <button className={`${BTN_PRIMARY} w-full`} type="submit" disabled={busy}>{busy ? 'Mendaftarkan…' : 'Daftar'}</button>
         <p className="text-center text-slate-600">
           Sudah punya akun?{' '}
           <button type="button" className="font-semibold text-blue-700 h-11 px-1" onClick={() => go('login')}>Login</button>
@@ -758,11 +831,19 @@ const BIZ_TYPES = ['Cilok goreng', 'Warung makan', 'Laundry kiloan', 'Fotokopi',
 
 function Setup({ biz, setBiz, user, onDone }) {
   const [name, setName] = useState(biz.name);
-  const [type, setType] = useState(BIZ_TYPES.includes(biz.type) ? biz.type : 'Lainnya');
+  const [type, setType] = useState(BIZ_TYPES.includes(biz.type) ? biz.type : biz.type ? 'Lainnya' : BIZ_TYPES[0]);
   const [other, setOther] = useState(BIZ_TYPES.includes(biz.type) ? '' : biz.type);
-  const submit = e => {
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async e => {
     e.preventDefault();
-    setBiz({ name: name.trim() || 'Usaha saya', type: type === 'Lainnya' ? (other.trim() || 'Lainnya') : type });
+    const data = { name: name.trim() || 'Usaha saya', type: type === 'Lainnya' ? (other.trim() || 'Lainnya') : type };
+    if (API.enabled) {
+      setBusy(true);
+      try { await api('/me', { method: 'PUT', body: { business_name: data.name, business_type: data.type, setup_done: true } }); }
+      catch (e2) { setBusy(false); return setErr(e2.message); }
+    }
+    setBiz(data);
     onDone();
   };
   return (
@@ -790,18 +871,32 @@ function Setup({ biz, setBiz, user, onDone }) {
             <input className={`${INPUT} mt-2`} value={other} onChange={e => setOther(e.target.value)} placeholder="Tulis jenis usahamu" autoFocus />
           )}
         </div>
-        <button className={`${BTN_PRIMARY} w-full`} type="submit">Mulai mencatat</button>
+        <FormError text={err} />
+        <button className={`${BTN_PRIMARY} w-full`} type="submit" disabled={busy}>Mulai mencatat</button>
       </form>
     </AuthShell>
   );
 }
 
-function Login({ go, onLogin, setToast }) {
+function Login({ go, onLogin, onAuth, setToast }) {
   const [f, setF] = useState({ contact: '', pass: '' });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const run = async (path, body) => {
+    setBusy(true); setErr('');
+    try { onAuth(await api(path, { method: 'POST', body })); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+  const submit = e => {
+    e.preventDefault();
+    if (!API.enabled) return onLogin();
+    if (!f.contact.trim() || !f.pass) return setErr('Isi nomor HP atau email dan kata sandi dulu.');
+    run('/auth/login', { contact: f.contact.trim(), password: f.pass });
+  };
   return (
     <AuthShell>
       <PageHeader title="Login" onBack={() => go('landing')} />
-      <form onSubmit={e => { e.preventDefault(); onLogin(); }} className="px-5 py-6 space-y-5">
+      <form onSubmit={submit} className="px-5 py-6 space-y-5">
         <p className="text-slate-600">Selamat datang lagi. Masukkan akunmu.</p>
         <Field label="Nomor HP atau email">
           <input className={INPUT} value={f.contact} onChange={e => setF({ ...f, contact: e.target.value })} placeholder="0812xxxx atau nama@email.com" autoComplete="username" />
@@ -812,7 +907,13 @@ function Login({ go, onLogin, setToast }) {
         <div className="-mt-2 text-right">
           <button type="button" className="h-11 px-1 text-sm font-semibold text-blue-700" onClick={() => setToast('Lupa kata sandi belum tersedia di prototipe')}>Lupa kata sandi?</button>
         </div>
-        <button className={`${BTN_PRIMARY} w-full`} type="submit">Login</button>
+        <FormError text={err} />
+        <button className={`${BTN_PRIMARY} w-full`} type="submit" disabled={busy}>{busy ? 'Masuk…' : 'Login'}</button>
+        {API.enabled && API.demo && (
+          <button type="button" className={`${BTN_SECONDARY} w-full`} disabled={busy} onClick={() => run('/auth/demo')}>
+            Coba pakai akun demo
+          </button>
+        )}
         <p className="text-center text-slate-600">
           Belum punya akun?{' '}
           <button type="button" className="font-semibold text-blue-700 h-11 px-1" onClick={() => go('daftar')}>Daftar</button>
@@ -1097,8 +1198,12 @@ function ConfirmCard({ m, stock = [], onSave, onEdit, onCancel, go }) {
   );
 }
 
-/* Nota contoh untuk simulasi scan (prototipe belum membaca foto sungguhan) */
+/* Nota contoh untuk mencoba scan tanpa foto. Yang pertama struk penjualan usaha sendiri (pemasukan). */
 const SAMPLE_RECEIPTS = [
+  { sale: true, store: 'JUALANS', lines: [
+    { item: 'Cilok goreng 10 porsi', amount: 50000 },
+    { item: 'Cilok goreng keju 4 porsi', amount: 28000 },
+    { item: 'Es teh manis 4 gelas', amount: 12000 }] },
   { store: 'Toko Bahan Kue Sumber Rejeki', lines: [
     { item: 'Tepung tapioka 5 kg', qty: 5, unit: 'kg', amount: 65000 },
     { item: 'Bumbu kacang 1 kg', qty: 1, unit: 'kg', amount: 28000 },
@@ -1271,21 +1376,28 @@ function parseReceiptText(text) {
   return { store, date, total, lines };
 }
 
-function ReceiptCard({ m, stock, onToggle, onEditLine, onAddLine, onSave, onCancel, go }) {
+function ReceiptCard({ m, stock, onToggle, onEditLine, onAddLine, onSave, onCancel, onUndo, go }) {
   const pending = m.status === 'pending', saved = m.status === 'saved', cancelled = m.status === 'cancelled';
+  const editable = pending || (m.ai && saved);
+  const isIncome = m.lines.length > 0 && m.lines.every(l => l.type === 'masuk');
   const chosen = m.lines.filter(l => l.include);
   const net = sumBy(chosen, 'masuk') - sumBy(chosen, 'keluar');
   const readSum = m.lines.reduce((sum, l) => sum + l.amount, 0);
   return (
     <div className={`w-full max-w-[340px] rounded-2xl border bg-white shadow-sm overflow-hidden ${saved ? 'border-emerald-300' : 'border-slate-200'} ${cancelled ? 'opacity-60' : ''}`}>
       <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-sm font-semibold bg-slate-100 text-slate-800">
-        <span className="flex items-center gap-1.5"><Icon name="camera" className="w-4 h-4" />Hasil scan nota</span>
+        <span className="flex items-center gap-1.5"><Icon name={m.ai ? 'sparkle' : 'camera'} className="w-4 h-4" />{m.ai ? 'Dibaca AI' : 'Hasil scan nota'}</span>
         {saved && <span className="flex items-center gap-1 text-emerald-800"><Icon name="checkCircle" className="w-4 h-4" />Tersimpan</span>}
         {cancelled && <span className="text-slate-600">Dibatalkan</span>}
       </div>
       <div className="px-4 pt-3 pb-1">
-        <div className="font-bold">{m.store}</div>
-        <div className="text-sm text-slate-500">{relDayFull(m.lines[0].date)} · {m.lines.length} barang terbaca</div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-bold min-w-0 truncate">{m.store}</span>
+          <span className={`shrink-0 text-xs font-bold px-2 py-0.5 rounded-full ${isIncome ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+            {isIncome ? 'Pemasukan (+)' : 'Pengeluaran (−)'}
+          </span>
+        </div>
+        <div className="text-sm text-slate-500">{m.lines[0] ? relDayFull(m.lines[0].date) + ' · ' : ''}{m.lines.length} barang {m.ai && saved ? 'tersimpan' : 'terbaca'}</div>
       </div>
       <ul className="divide-y divide-slate-100">
         {m.lines.map(l => {
@@ -1297,14 +1409,14 @@ function ReceiptCard({ m, stock, onToggle, onEditLine, onAddLine, onSave, onCanc
                   <input type="checkbox" className="w-5 h-5 accent-blue-600" checked={l.include} onChange={() => onToggle(l.id)} aria-label={`Ikut disimpan: ${l.item}`} />
                 </label>
               ) : <span className="w-4 shrink-0" />}
-              <button disabled={!pending} onClick={() => onEditLine(l)} className="flex-1 min-w-0 min-h-[56px] flex items-center gap-2 py-2 pr-3 text-left disabled:cursor-default">
+              <button disabled={!editable} onClick={() => onEditLine(l)} className="flex-1 min-w-0 min-h-[56px] flex items-center gap-2 py-2 pr-3 text-left disabled:cursor-default">
                 <span className="flex-1 min-w-0">
                   <span className={`block font-semibold truncate ${l.include ? '' : 'line-through'}`}>{l.item}</span>
                   <span className="block text-xs text-slate-500 truncate">{l.category}{l.disc ? ` · diskon ${rupiah(l.disc)}` : ''}{st ? ` · stok +${fmtQty(l.stock.qty)} ${st.unit}` : l.stockMatch && pending ? ' · ketuk untuk isi stok' : ''}</span>
                   {l.fixed && pending && <span className="block text-xs text-amber-800">Terbaca {rupiah(l.read)}, disesuaikan dengan total nota</span>}
                 </span>
                 <span className={`font-bold tabular-nums text-sm ${l.type === 'masuk' ? 'text-emerald-700' : 'text-rose-700'}`}>{signed(l.type, l.amount)}</span>
-                {pending && <Icon name="edit" className="w-4 h-4 text-slate-400 shrink-0" />}
+                {editable && <Icon name="edit" className="w-4 h-4 text-slate-400 shrink-0" />}
               </button>
             </li>
           );
@@ -1334,7 +1446,20 @@ function ReceiptCard({ m, stock, onToggle, onEditLine, onAddLine, onSave, onCanc
           </div>
         </div>
       )}
-      {saved && <button className="w-full h-11 border-t border-slate-100 text-sm font-semibold text-blue-700" onClick={() => go('riwayat')}>Lihat di Riwayat</button>}
+      {m.ai && saved && (
+        <div className="px-3 pb-3">
+          {m.total ? (m.total === readSum
+            ? <p className="text-sm text-emerald-800 mb-2 flex items-center gap-1.5"><Icon name="checkCircle" className="w-4 h-4 shrink-0" />Cocok dengan total di struk ({rupiah(m.total)}).</p>
+            : <p className="text-sm text-amber-900 bg-amber-50 rounded-lg p-2.5 mb-2">Total di struk {rupiah(m.total)}, yang tersimpan {rupiah(readSum)}. Ketuk barang untuk membetulkan.</p>) : null}
+          {m.note && <p className="text-sm text-amber-900 bg-amber-50 rounded-lg p-2.5 mb-2">{m.note}</p>}
+          <p className="text-xs text-slate-500 mb-2">Sudah langsung tersimpan. Ketuk barang untuk mengubah.</p>
+          <div className="grid grid-cols-[auto_1fr] gap-2">
+            <button className={`${BTN_SECONDARY} px-4`} onClick={onUndo}>Batalkan</button>
+            <button className={BTN_PRIMARY} onClick={() => go('riwayat')}>Lihat di Riwayat</button>
+          </div>
+        </div>
+      )}
+      {saved && !m.ai && <button className="w-full h-11 border-t border-slate-100 text-sm font-semibold text-blue-700" onClick={() => go('riwayat')}>Lihat di Riwayat</button>}
     </div>
   );
 }
@@ -1374,7 +1499,9 @@ function ScanSheet({ onPick, onClose }) {
         </label>
         <button className="w-full h-11 text-sm font-semibold text-blue-700" onClick={() => onPick(null)}>Belum ada nota? Coba pakai contoh nota</button>
       </div>
-      <p className="mt-2 text-xs text-slate-500 text-center">Pertama kali butuh internet untuk menyiapkan pembaca nota.</p>
+      <p className="mt-2 text-xs text-slate-500 text-center">
+        {API.ai ? 'Struk dibaca AI lalu langsung tersimpan. Kamu tetap bisa membatalkannya.' : 'Pertama kali butuh internet untuk menyiapkan pembaca nota.'}
+      </p>
     </Sheet>
   );
 }
@@ -1457,7 +1584,7 @@ function StockCard({ m, item, onSave, onEdit, onCancel, go }) {
   );
 }
 
-function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock, applyStock, setStockModal }) {
+function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock, applyStock, setStockModal, biz, openEditTx, mergeScan, undoScan }) {
   const [text, setText] = useState('');
   const endRef = useRef(null);
   const inputRef = useRef(null);
@@ -1531,7 +1658,7 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
   };
 
   const saveDraft = (msgId, draft) => {
-    const nt = addTx(draft);
+    const nt = addTx({ ...draft, source: 'chat' });
     patch(msgId, { status: 'saved', draft });
     let follow;
     if (nt.date === todayKey()) {
@@ -1627,20 +1754,53 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
   const cancelVoice = () => { stopVoice(true); setVoice(null); };
 
   /* ---- Scan nota ---- */
-  const makeLine = (l, date) => {
-    const line = { id: uid(), type: 'keluar', item: l.item, amount: l.amount, date, include: true, fixed: l.fixed, read: l.read, disc: l.disc,
-      category: guessCategory('keluar', l.item.toLowerCase(), cats) };
+  const makeLine = (l, date, type = 'keluar') => {
+    const line = { id: uid(), type, item: l.item, amount: l.amount, date, include: true, fixed: l.fixed, read: l.read, disc: l.disc,
+      category: guessCategory(type, l.item.toLowerCase(), cats) };
+    if (type === 'masuk') return line;
     const st = matchStock(l.item, stock);
     const q = st && stockQtyFor(st, l.size, l.sizeUnit, l.count);
     if (st) { line.stockMatch = st.id; if (q) line.stock = { itemId: st.id, qty: q }; }
     return line;
   };
+  // Kirim foto ke AI di server. Hasilnya langsung tersimpan; false = AI tidak tersedia, pakai OCR di HP.
+  const scanWithAi = async src => {
+    const scanId = uid();
+    setMessages(ms => [...ms, { id: scanId, from: 'bot', kind: 'scanning', label: 'AI sedang membaca struk…', progress: null }]);
+    try {
+      const form = new FormData();
+      form.append('file', await imageToJpeg(src), 'struk.jpg');
+      const r = await api('/scan', { method: 'POST', form });
+      setMessages(ms => ms.filter(x => x.id !== scanId));
+      mergeScan(r);
+      const net = sumBy(r.transactions, 'masuk') - sumBy(r.transactions, 'keluar');
+      const stocked = r.stock.map(x => x.name.toLowerCase());
+      setMessages(ms => [...ms, { id: uid(), from: 'bot', kind: 'receipt', status: 'saved', ai: true, scanId: r.scanId,
+        store: r.store, total: r.total, note: r.note, lines: r.transactions.map(t => ({ ...t, include: true })) }]);
+      botReply({ kind: 'text', actions: [{ key: 'beranda', label: 'Lihat Beranda' }],
+        text: `Sip, ${r.transactions.length} catatan ${r.kind === 'masuk' ? 'pemasukan' : 'pengeluaran'} dari struk langsung tersimpan (${signedNum(net)}).` +
+          (stocked.length ? ` Stok ${stocked.join(', ')} ikut bertambah.` : '') }, 500);
+      return true;
+    } catch (e) {
+      setMessages(ms => ms.filter(x => x.id !== scanId));
+      if (['not_receipt', 'bad_image', 'image_too_large', 'ai_refused'].includes(e.code)) {
+        botReply({ kind: 'text', text: e.message, actions: [{ key: 'scan', label: 'Foto ulang' }, { key: 'form', label: 'Isi form manual', draft: {} }] }, 300);
+        return true;
+      }
+      setMessages(ms => [...ms, { id: uid(), from: 'bot', kind: 'text', text: `${e.message} Saya baca pakai pembaca nota di HP dulu ya.` }]);
+      return false;
+    }
+  };
   const handleScan = async src => {
     setScanOpen(false);
-    if (!src) src = receiptImage(SAMPLE_RECEIPTS[scanIdx.current++ % SAMPLE_RECEIPTS.length]);
+    if (!src) {
+      const r = SAMPLE_RECEIPTS[scanIdx.current++ % SAMPLE_RECEIPTS.length];
+      src = receiptImage(r.sale ? { ...r, store: (biz.name || 'Jualans').toUpperCase() } : r);
+    }
+    setMessages(ms => [...ms, { id: uid(), from: 'user', kind: 'image', src }]);
+    if (API.enabled && API.ai && await scanWithAi(src)) return;
     const scanId = uid();
-    setMessages(ms => [...ms, { id: uid(), from: 'user', kind: 'image', src },
-      { id: scanId, from: 'bot', kind: 'scanning', label: 'Menyiapkan pembaca nota…', progress: 0 }]);
+    setMessages(ms => [...ms, { id: scanId, from: 'bot', kind: 'scanning', label: 'Menyiapkan pembaca nota…', progress: 0 }]);
     const onProgress = m => patch(scanId, {
       label: /recogniz/.test(m.status) ? 'Membaca tulisan di nota…' : 'Menyiapkan pembaca nota…',
       progress: Math.round((m.progress || 0) * 100),
@@ -1654,8 +1814,10 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
     if (!parsed.lines.length) return botReply({ kind: 'text', actions: retry,
       text: 'Maaf, barang dan harganya belum terbaca jelas. Coba foto ulang di tempat terang, nota diratakan, dan HP tegak lurus di atas nota.' }, 300);
     const date = parsed.date || todayKey();
+    // Struk dari usaha sendiri = penjualan (uang masuk); nota dari toko lain = belanja (uang keluar)
+    const isSale = !!(parsed.store && biz.name && parsed.store.toLowerCase().includes(biz.name.toLowerCase()));
     botReply({ kind: 'receipt', status: 'pending', store: parsed.store || 'Nota belanja', total: parsed.total,
-      lines: parsed.lines.map(l => makeLine(l, date)) }, 300);
+      lines: parsed.lines.map(l => makeLine(l, date, isSale ? 'masuk' : 'keluar')) }, 300);
   };
   const patchLine = (msgId, lineId, p) => setMessages(ms => ms.map(x => x.id !== msgId ? x
     : { ...x, lines: x.lines.map(l => l.id === lineId ? { ...l, ...(typeof p === 'function' ? p(l) : p) } : l) }));
@@ -1667,9 +1829,18 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
     mode: 'draft', initial: { type: 'keluar', date: m.lines[0] ? m.lines[0].date : todayKey() },
     onSave: f => setMessages(ms => ms.map(x => x.id !== m.id ? x : { ...x, lines: [...x.lines, { ...f, id: uid(), include: true }] })),
   });
+  const undoAiScan = async m => {
+    try {
+      const r = await undoScan(m.scanId);
+      patch(m.id, { status: 'cancelled' });
+      botReply({ kind: 'text', text: `Oke, ${r.deleted.length} catatan dari struk itu sudah dibatalkan.` }, 300);
+    } catch (e) {
+      botReply({ kind: 'text', text: `Gagal membatalkan: ${e.message}` }, 300);
+    }
+  };
   const saveReceipt = m => {
     const chosen = m.lines.filter(l => l.include);
-    chosen.forEach(l => addTx({ type: l.type, item: l.item, amount: l.amount, category: l.category, date: l.date, stock: l.stock }));
+    chosen.forEach(l => addTx({ type: l.type, item: l.item, amount: l.amount, category: l.category, date: l.date, stock: l.stock, source: 'scan' }));
     patch(m.id, { status: 'saved' });
     const net = sumBy(chosen, 'masuk') - sumBy(chosen, 'keluar');
     const stocked = chosen.filter(l => l.stock).map(l => (stock.find(x => x.id === l.stock.itemId) || {}).name).filter(Boolean);
@@ -1689,7 +1860,7 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
     if (r) markStockSaved(m, m.change, r);
   };
   const saveDraftNew = f => {
-    const nt = addTx(f);
+    const nt = addTx({ ...f, source: 'form' });
     setMessages(ms => [...ms, { id: uid(), from: 'bot', kind: 'card', status: 'saved', draft: { ...f, id: nt.id } }]);
   };
 
@@ -1727,20 +1898,30 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
             <div key={m.id} className="flex">
               <div className="w-[260px] bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-3" role="status">
                 <div className="flex items-center justify-between gap-2 text-sm">
-                  <span className="font-semibold text-slate-700">{m.label}</span><span className="tabular-nums text-slate-500">{m.progress}%</span>
+                  <span className="font-semibold text-slate-700">{m.label}</span>
+                  {m.progress != null && <span className="tabular-nums text-slate-500">{m.progress}%</span>}
                 </div>
                 <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
-                  <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${m.progress}%` }} />
+                  {m.progress != null
+                    ? <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${m.progress}%` }} />
+                    : <div className="h-full w-1/3 rounded-full bg-blue-600 indeterminate" />}
                 </div>
               </div>
             </div>
           );
-          if (m.kind === 'receipt') return (
-            <div key={m.id} className="msg-in flex">
-              <ReceiptCard m={m} stock={stock} go={go} onSave={() => saveReceipt(m)} onCancel={() => patch(m.id, { status: 'cancelled' })}
-                onToggle={id => patchLine(m.id, id, l => ({ include: !l.include }))} onEditLine={l => editLine(m, l)} onAddLine={() => addLine(m)} />
-            </div>
-          );
+          if (m.kind === 'receipt') {
+            // Hasil AI sudah tersimpan: tampilkan isi terbaru dari daftar transaksi (kalau sempat diubah/dihapus)
+            const view = m.ai && m.status === 'saved'
+              ? { ...m, lines: m.lines.map(l => txs.find(t => t.id === l.id)).filter(Boolean).map(t => ({ ...t, include: true })) }
+              : m;
+            return (
+              <div key={m.id} className="msg-in flex">
+                <ReceiptCard m={view} stock={stock} go={go} onSave={() => saveReceipt(m)} onCancel={() => patch(m.id, { status: 'cancelled' })}
+                  onToggle={id => patchLine(m.id, id, l => ({ include: !l.include }))} onAddLine={() => addLine(m)} onUndo={() => undoAiScan(m)}
+                  onEditLine={l => m.ai ? openEditTx(txs.find(t => t.id === l.id)) : editLine(m, l)} />
+              </div>
+            );
+          }
           if (m.kind === 'stock') return (
             <div key={m.id} className="msg-in flex">
               <StockCard m={m} item={stock.find(s => s.id === m.itemId)} go={go} onSave={() => saveStockCard(m)}
@@ -1820,7 +2001,7 @@ function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock,
 /* =========================================================
    RIWAYAT
    ========================================================= */
-const DATE_FILTERS = [['semua', 'Semua'], ['hari', 'Hari ini'], ['7', '7 hari'], ['bulan', 'Bulan ini'], ['pilih', 'Pilih tanggal']];
+const DATE_FILTERS = [['semua', '3 bulan'], ['hari', 'Hari ini'], ['7', '7 hari'], ['bulan', 'Bulan ini'], ['pilih', 'Pilih tanggal']];
 
 function Riwayat({ txs, cats, openEditTx, openNewTx, go }) {
   const [q, setQ] = useState('');
@@ -1833,6 +2014,7 @@ function Riwayat({ txs, cats, openEditTx, openNewTx, go }) {
   const filtered = sortTx(txs).filter(x => {
     if (q && !(`${x.item} ${x.category}`.toLowerCase().includes(q.toLowerCase()))) return false;
     if (cat && x.category !== cat) return false;
+    if (x.date < addDays(t, -89)) return false;     // riwayat hanya 3 bulan terakhir
     if (df === 'hari' && x.date !== t) return false;
     if (df === '7' && x.date < addDays(t, -6)) return false;
     if (df === 'bulan' && x.date.slice(0, 7) !== t.slice(0, 7)) return false;
@@ -1845,7 +2027,7 @@ function Riwayat({ txs, cats, openEditTx, openNewTx, go }) {
 
   return (
     <div>
-      <PageHeader title="Riwayat" subtitle={`${txs.length} transaksi tercatat`}
+      <PageHeader title="Riwayat" subtitle={`${txs.filter(x => x.date >= addDays(t, -89)).length} transaksi · 3 bulan terakhir`}
         right={
           <button onClick={openNewTx} aria-label="Tambah transaksi manual" className="w-11 h-11 mr-1 rounded-full bg-blue-50 text-blue-700 grid place-items-center hover:bg-blue-100">
             <Icon name="plus" />
@@ -2403,7 +2585,7 @@ function Toast({ text: raw }) {
    Aplikasi setelah login
    ========================================================= */
 function MainApp(props) {
-  const { user, setUser, biz, setBiz, txs, setTxs, debts, setDebts, cats, setCats, stock, setStock, onLogout, setToast } = props;
+  const { user, setUser, biz, setBiz, txs, setTxs, debts, setDebts, cats, setCats, stock, setStock, onLogout, setToast, applyBootstrap } = props;
   const [page, setPage] = useState('beranda');
   const [bonId, setBonId] = useState(null);
   const [txModal, setTxModal] = useState(null);
@@ -2414,14 +2596,19 @@ function MainApp(props) {
 
   const go = p => { setPage(p); window.scrollTo(0, 0); };
 
+  // Tampilan diperbarui langsung; kalau tersambung ke server, perubahan ikut dikirim ke database
+  const remote = (path, opts) => !API.enabled ? Promise.resolve(null)
+    : api(path, opts).catch(e => { setToast({ warn: true, text: `Belum tersimpan ke server: ${e.message}` }); return null; });
+
   // Ubah stok satu bahan; beri peringatan kalau baru saja jadi hampir habis / habis
-  const applyStock = (itemId, change, note, date = todayKey()) => {
+  const applyStock = (itemId, change, note, date = todayKey(), push = true) => {
     const s = stock.find(x => x.id === itemId);
     if (!s) return null;
     const round = v => Math.max(0, Math.round(v * 100) / 100);
     const entry = { id: uid(), date, time: nowTime(), change, note };
     setStock(list => list.map(x => x.id === itemId ? { ...x, qty: round(x.qty + change), history: [entry, ...x.history] } : x));
     const r = { ...s, qty: round(s.qty + change) };
+    if (push) remote(`/stock/${itemId}/adjust`, { method: 'POST', body: { change, note, date } });
     const before = stockStatus(s), after = stockStatus(r);
     if (after !== before && after !== 'aman') {
       setTimeout(() => setToast({ warn: true, text: after === 'habis'
@@ -2433,43 +2620,65 @@ function MainApp(props) {
   const saveStockItem = (data, id) => {
     if (id) {
       setStock(list => list.map(s => s.id === id ? { ...s, ...data, keywords: data.name !== s.name ? stockKeywords(data.name) : s.keywords } : s));
+      remote(`/stock/${id}`, { method: 'PUT', body: { name: data.name, unit: data.unit, min: data.min } });
       setToast('Info bahan disimpan');
     } else {
+      const newId = uid();
       const history = data.qty ? [{ id: uid(), date: todayKey(), time: nowTime(), change: data.qty, note: 'Stok awal' }] : [];
-      setStock(list => [...list, { id: uid(), ...data, keywords: stockKeywords(data.name), history }]);
+      setStock(list => [...list, { id: newId, ...data, keywords: stockKeywords(data.name), history }]);
+      remote('/stock', { method: 'POST', body: { id: newId, ...data } });
       setToast(`${data.name} ditambahkan ke stok`);
     }
   };
   const askDeleteStock = item => setConfirm({
     title: `Hapus ${item.name}?`, danger: true, confirmText: 'Hapus',
     message: 'Bahan ini dan riwayat stoknya akan dihapus dari daftar.',
-    onConfirm: () => { setStock(l => l.filter(s => s.id !== item.id)); setStockModal(null); setToast('Bahan dihapus'); },
+    onConfirm: () => { setStock(l => l.filter(s => s.id !== item.id)); remote(`/stock/${item.id}`, { method: 'DELETE' }); setStockModal(null); setToast('Bahan dihapus'); },
   });
 
-  const addTx = tx => {
+  const addTx = (tx, push = true) => {
     const nt = { ...tx, id: uid(), time: tx.time || nowTime() };
     setTxs(p => [nt, ...p]);
-    if (tx.stock && tx.stock.qty > 0) applyStock(tx.stock.itemId, tx.stock.qty, `Belanja: ${tx.item}`, tx.date);
+    const withStock = tx.stock && tx.stock.qty > 0;
+    if (withStock) applyStock(tx.stock.itemId, tx.stock.qty, `Belanja: ${tx.item}`, tx.date, false);
+    if (push) remote('/transactions', { method: 'POST', body: {
+      id: nt.id, type: nt.type, item: nt.item, amount: nt.amount, category: nt.category, date: nt.date, time: nt.time,
+      source: tx.source || 'manual', stock: withStock ? { itemId: tx.stock.itemId, qty: tx.stock.qty } : null } });
     return nt;
   };
-  const openNewTx = () => setTxModal({ mode: 'new', initial: {}, onSave: f => { const nt = addTx(f); setToast(`Tersimpan ${signed(nt.type, nt.amount)}`); } });
+  // Hasil scan AI sudah disimpan server: cukup masukkan ke tampilan
+  const mergeScan = r => {
+    setTxs(p => [...r.transactions, ...p]);
+    if (r.stock.length) setStock(list => list.map(s => r.stock.find(x => x.id === s.id) || s));
+  };
+  const undoScan = async scanId => {
+    const r = await api(`/scans/${scanId}`, { method: 'DELETE' });
+    setTxs(p => p.filter(t => !r.deleted.includes(t.id)));
+    if (r.stock.length) setStock(list => list.map(s => r.stock.find(x => x.id === s.id) || s));
+    return r;
+  };
+  const openNewTx = () => setTxModal({ mode: 'new', initial: {}, onSave: f => { const nt = addTx({ ...f, source: 'form' }); setToast(`Tersimpan ${signed(nt.type, nt.amount)}`); } });
   const openEditTx = tx => setTxModal({
     mode: 'edit', initial: tx,
-    onSave: f => { setTxs(p => p.map(x => x.id === tx.id ? { ...x, ...f } : x)); setToast('Perubahan disimpan'); },
+    onSave: f => {
+      setTxs(p => p.map(x => x.id === tx.id ? { ...x, ...f } : x));
+      remote(`/transactions/${tx.id}`, { method: 'PUT', body: { type: f.type, item: f.item, amount: f.amount, category: f.category, date: f.date } });
+      setToast('Perubahan disimpan');
+    },
     onDelete: () => setConfirm({
       title: 'Hapus transaksi ini?', danger: true, confirmText: 'Hapus',
       message: `${tx.item} (${signed(tx.type, tx.amount)}) akan dihapus dan tidak bisa dikembalikan.`,
-      onConfirm: () => { setTxs(p => p.filter(x => x.id !== tx.id)); setTxModal(null); setToast('Transaksi dihapus'); },
+      onConfirm: () => { setTxs(p => p.filter(x => x.id !== tx.id)); remote(`/transactions/${tx.id}`, { method: 'DELETE' }); setTxModal(null); setToast('Transaksi dihapus'); },
     }),
   });
 
   const saveBon = ({ name, desc, amount, date }) => {
     const item = { id: uid(), desc, amount, date, paid: false };
-    setDebts(list => {
-      const ex = list.find(d => d.name.toLowerCase() === name.toLowerCase());
-      if (ex) return list.map(d => d === ex ? { ...d, items: [...d.items, item] } : d);
-      return [...list, { id: uid(), name, note: 'Pelanggan', items: [item] }];
-    });
+    const ex = debts.find(d => d.name.toLowerCase() === name.toLowerCase());
+    const customerId = ex ? ex.id : uid();
+    setDebts(list => ex ? list.map(d => d.id === ex.id ? { ...d, items: [...d.items, item] } : d)
+      : [...list, { id: customerId, name, note: 'Pelanggan', items: [item] }]);
+    remote('/debts', { method: 'POST', body: { name, desc, amount, date, itemId: item.id, customerId } });
     setToast(`Bon ${name} ${rupiah(amount)} dicatat`);
   };
 
@@ -2483,7 +2692,8 @@ function MainApp(props) {
       onConfirm: record => {
         const t = todayKey();
         setDebts(list => list.map(x => x.id === d.id ? { ...x, items: x.items.map(i => i.paid ? i : { ...i, paid: true, paidDate: t }) } : x));
-        if (record) addTx({ type: 'masuk', item: `Pelunasan bon ${d.name}`, amount: sum, category: cats.masuk.includes('Pelunasan bon') ? 'Pelunasan bon' : cats.masuk[0], date: t });
+        const nt = record ? addTx({ type: 'masuk', item: `Pelunasan bon ${d.name}`, amount: sum, category: cats.masuk.includes('Pelunasan bon') ? 'Pelunasan bon' : cats.masuk[0], date: t }, false) : null;
+        remote(`/customers/${d.id}/settle`, { method: 'POST', body: { recordIncome: record, txId: nt ? nt.id : null } });
         setToast(`Bon ${d.name} lunas${record ? ` · +${rupiah(sum)}` : ''}`);
       },
     });
@@ -2495,17 +2705,27 @@ function MainApp(props) {
     <div className="mx-auto max-w-[420px] min-h-screen bg-white pb-16 sm:shadow-xl sm:shadow-slate-300/40">
       {page === 'beranda' && <Beranda biz={biz} user={user} txs={txs} debts={debts} stock={stock} go={go} openEditTx={openEditTx} openNewTx={openNewTx} />}
       {page === 'catat' && <Catat messages={messages} setMessages={setMessages} txs={txs} cats={cats} addTx={addTx} setTxModal={setTxModal} go={go}
-                                  stock={stock} applyStock={applyStock} setStockModal={setStockModal} />}
+                                  stock={stock} applyStock={applyStock} setStockModal={setStockModal} biz={biz} openEditTx={openEditTx}
+                                  mergeScan={mergeScan} undoScan={undoScan} />}
       {page === 'stok' && <Stok stock={stock} go={go} setStockModal={setStockModal} />}
       {page === 'riwayat' && <Riwayat txs={txs} cats={cats} openEditTx={openEditTx} openNewTx={openNewTx} go={go} />}
       {page === 'bon' && <Bon debts={debts} openBon={id => { setBonId(id); go('bonDetail'); }} openAddBon={() => setBonModal({})} />}
       {page === 'bonDetail' && <BonDetail d={currentDebt} go={go} openAddBon={name => setBonModal({ name })} askLunas={askLunas} />}
       {page === 'pengaturan' && (
-        <Pengaturan biz={biz} setBiz={setBiz} user={user} setUser={setUser} cats={cats} setCats={setCats} go={go} setToast={setToast}
+        <Pengaturan biz={biz} go={go} setToast={setToast} user={user} cats={cats}
+          setBiz={b => { setBiz(b); remote('/me', { method: 'PUT', body: { business_name: b.name, business_type: b.type } }); }}
+          setUser={u => { setUser(u); remote('/me', { method: 'PUT', body: { name: u.name } }); }}
+          setCats={c => { setCats(c); remote('/categories', { method: 'PUT', body: c }); }}
           onLogout={() => setConfirm({ title: 'Keluar dari akun?', message: 'Kamu bisa login lagi kapan saja.', confirmText: 'Keluar', danger: true, onConfirm: onLogout })}
           onClear={() => setConfirm({ title: 'Kosongkan semua data?', message: 'Semua transaksi, bon, dan stok contoh akan dihapus.', confirmText: 'Kosongkan', danger: true,
-            onConfirm: () => { setTxs([]); setDebts([]); setStock([]); setToast('Data dikosongkan'); } })}
-          onReload={() => { setTxs(makeSampleTx()); setDebts(makeSampleDebts()); setStock(makeSampleStock()); setToast('Data contoh diisi ulang'); }} />
+            onConfirm: () => {
+              if (API.enabled) return remote('/demo/reset', { method: 'POST', body: { mode: 'empty' } }).then(d => { if (d) { applyBootstrap(d); setToast('Data dikosongkan'); } });
+              setTxs([]); setDebts([]); setStock([]); setToast('Data dikosongkan');
+            } })}
+          onReload={() => {
+            if (API.enabled) return remote('/demo/reset', { method: 'POST', body: { mode: 'sample' } }).then(d => { if (d) { applyBootstrap(d); setToast('Data contoh 3 bulan diisi ulang'); } });
+            setTxs(makeSampleTx()); setDebts(makeSampleDebts()); setStock(makeSampleStock()); setToast('Data contoh diisi ulang');
+          }} />
       )}
 
       <BottomNav page={page} go={go} />
@@ -2541,7 +2761,7 @@ function MainApp(props) {
    Akar aplikasi
    ========================================================= */
 function App() {
-  const [screen, setScreen] = useState('landing'); // landing | daftar | setup | login | app
+  const [screen, setScreen] = useState('loading'); // loading | landing | daftar | setup | login | app
   const [user, setUser] = useState({ name: 'Rina', contact: '0812-3456-7890' });
   const [biz, setBiz] = useState({ name: 'Jualans', type: 'Cilok goreng' });
   const [txs, setTxs] = useState(makeSampleTx);
@@ -2558,16 +2778,59 @@ function App() {
 
   const go = s => { setScreen(s); window.scrollTo(0, 0); };
 
+  const applyBootstrap = d => {
+    setUser(d.user);
+    setBiz({ name: d.business.name, type: d.business.type });
+    setTxs(d.transactions); setDebts(d.customers); setCats(d.categories); setStock(d.stock);
+  };
+  const onAuth = d => {
+    API.token = d.token;
+    storage.set('jualans_token', d.token);
+    applyBootstrap(d);
+    go(d.business.setupDone ? 'app' : 'setup');
+  };
+  const logout = () => {
+    if (API.enabled) {
+      api('/auth/logout', { method: 'POST' }).catch(() => {});
+      API.token = null;
+      storage.set('jualans_token', null);
+    }
+    go('landing');
+  };
+
+  // Saat dibuka: cari backend, lalu lanjutkan sesi login yang tersimpan
+  useEffect(() => {
+    (async () => {
+      if (await detectBackend()) {
+        const saved = storage.get('jualans_token');
+        if (saved) {
+          API.token = saved;
+          try {
+            const d = await api('/bootstrap');
+            applyBootstrap(d);
+            return setScreen(d.business.setupDone ? 'app' : 'setup');
+          } catch (e) { API.token = null; storage.set('jualans_token', null); }
+        }
+      }
+      setScreen('landing');
+    })();
+  }, []);
+
   return (
     <>
+      {screen === 'loading' && (
+        <div className="min-h-screen grid place-items-center" role="status">
+          <div className="flex flex-col items-center gap-3 text-slate-500"><Logo size="lg" />Memuat…</div>
+        </div>
+      )}
       {screen === 'landing' && <Landing go={go} />}
-      {screen === 'daftar' && <Register go={go} setUser={setUser} />}
+      {screen === 'daftar' && <Register go={go} setUser={setUser} onAuth={onAuth} />}
       {screen === 'setup' && <Setup biz={biz} setBiz={setBiz} user={user} onDone={() => go('app')} />}
-      {screen === 'login' && <Login go={go} onLogin={() => go('app')} setToast={setToast} />}
+      {screen === 'login' && <Login go={go} onLogin={() => go('app')} onAuth={onAuth} setToast={setToast} />}
       {screen === 'app' && (
         <MainApp user={user} setUser={setUser} biz={biz} setBiz={setBiz} txs={txs} setTxs={setTxs}
                  debts={debts} setDebts={setDebts} cats={cats} setCats={setCats} stock={stock} setStock={setStock} setToast={setToast}
-                 onLogout={() => go('landing')} />
+                 applyBootstrap={applyBootstrap} onLogout={logout} />
       )}
       {toast && <Toast text={toast} />}
     </>
