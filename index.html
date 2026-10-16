@@ -1,0 +1,2580 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2563eb">
+<title>Jualans – Prototipe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: { fontFamily: { sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'] } } }
+  };
+</script>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  html, body { background: #f1f5f9; -webkit-tap-highlight-color: transparent; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  @keyframes sheetUp { from { transform: translateY(32px); opacity: 0 } to { transform: none; opacity: 1 } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+  @keyframes pop { from { opacity: 0; transform: scale(.96) } to { opacity: 1; transform: none } }
+  .sheet-in { animation: sheetUp .22s ease-out; }
+  .msg-in { animation: fadeIn .2s ease-out; }
+  .pop-in { animation: pop .18s ease-out; }
+  .dot { animation: blink 1.2s infinite both; }
+  .dot:nth-child(2) { animation-delay: .2s } .dot:nth-child(3) { animation-delay: .4s }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
+  input[type="date"] { min-height: 48px; }
+</style>
+</head>
+<body class="font-sans text-slate-900 antialiased">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+/* =========================================================
+   Utilitas: tanggal, uang, id
+   ========================================================= */
+const pad = n => String(n).padStart(2, '0');
+const toKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const fromKey = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
+const todayKey = () => toKey(new Date());
+const addDays = (k, n) => { const d = fromKey(k); d.setDate(d.getDate() + n); return toKey(d); };
+const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+let _id = 0;
+const uid = () => `id${Date.now().toString(36)}${(_id++).toString(36)}`;
+
+const HARI = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
+const HARI_PANJANG = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+const BULAN = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+const BULAN_PANJANG = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+const fmtDate = k => { const d = fromKey(k); return `${d.getDate()} ${BULAN[d.getMonth()]} ${d.getFullYear()}`; };
+const relDay = k => {
+  const t = todayKey();
+  if (k === t) return 'Hari ini';
+  if (k === addDays(t, -1)) return 'Kemarin';
+  const d = fromKey(k);
+  return `${HARI_PANJANG[d.getDay()]}, ${d.getDate()} ${BULAN[d.getMonth()]}`;
+};
+const relLower = k => { const r = relDay(k); return r.includes(',') ? r : r.toLowerCase(); };
+const relDayFull = k => {
+  const r = relDay(k);
+  return (r === 'Hari ini' || r === 'Kemarin') ? `${r}, ${fmtDate(k)}` : fmtDate(k);
+};
+
+const rupiah = n => 'Rp' + Math.round(Math.abs(n)).toLocaleString('id-ID');
+const signed = (type, n) => (type === 'masuk' ? '+' : '−') + rupiah(n);
+const signedNum = n => (n < 0 ? '−' : n > 0 ? '+' : '') + rupiah(n);
+const sortTx = list => [...list].sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+const sumBy = (list, type) => list.filter(t => t.type === type).reduce((s, t) => s + t.amount, 0);
+const cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+const fmtQty = n => Number(n).toLocaleString('id-ID', { maximumFractionDigits: 2 });
+const toNum = s => parseFloat(String(s).replace(',', '.')) || 0;
+
+/* =========================================================
+   Data contoh: usaha "Jualans", cilok goreng
+   ========================================================= */
+const DEFAULT_CATS = {
+  masuk: ['Penjualan', 'Pesanan', 'Pelunasan bon', 'Lain-lain'],
+  keluar: ['Bahan baku', 'Operasional', 'Sewa', 'Gaji', 'Lain-lain'],
+};
+
+function makeSampleTx() {
+  const t = todayKey();
+  const T = (d, time, type, item, amount, category) =>
+    ({ id: uid(), date: addDays(t, -d), time, type, item, amount, category });
+  return [
+    T(6, '07:15', 'keluar', 'Tepung tapioka 5 kg', 65000, 'Bahan baku'),
+    T(6, '07:40', 'keluar', 'Gas elpiji 3 kg', 22000, 'Operasional'),
+    T(6, '17:30', 'masuk', 'Cilok goreng (35 porsi)', 175000, 'Penjualan'),
+    T(5, '07:20', 'keluar', 'Daging ayam giling 1 kg', 48000, 'Bahan baku'),
+    T(5, '16:45', 'masuk', 'Cilok goreng (40 porsi)', 200000, 'Penjualan'),
+    T(5, '17:00', 'masuk', 'Es teh manis (15 gelas)', 45000, 'Penjualan'),
+    T(4, '07:05', 'keluar', 'Minyak goreng 2 liter', 36000, 'Bahan baku'),
+    T(4, '08:10', 'keluar', 'Plastik & tusuk sate', 25000, 'Operasional'),
+    T(4, '17:15', 'masuk', 'Cilok goreng (28 porsi)', 140000, 'Penjualan'),
+    T(3, '07:30', 'keluar', 'Bumbu kacang & cabai', 30000, 'Bahan baku'),
+    T(3, '13:00', 'masuk', 'Pesanan arisan Bu RT (50 porsi)', 250000, 'Pesanan'),
+    T(3, '17:40', 'masuk', 'Cilok goreng (30 porsi)', 150000, 'Penjualan'),
+    T(2, '07:10', 'keluar', 'Tepung tapioka 5 kg', 65000, 'Bahan baku'),
+    T(2, '07:25', 'keluar', 'Gas elpiji 3 kg', 22000, 'Operasional'),
+    T(2, '17:20', 'masuk', 'Cilok goreng (38 porsi)', 190000, 'Penjualan'),
+    T(1, '07:15', 'keluar', 'Daging ayam giling 1 kg', 48000, 'Bahan baku'),
+    T(1, '17:10', 'masuk', 'Cilok goreng (45 porsi)', 225000, 'Penjualan'),
+    T(1, '17:35', 'masuk', 'Es teh manis (20 gelas)', 60000, 'Penjualan'),
+    T(0, '07:05', 'keluar', 'Minyak goreng 2 liter', 36000, 'Bahan baku'),
+    T(0, '11:30', 'masuk', 'Cilok goreng (18 porsi)', 90000, 'Penjualan'),
+  ];
+}
+
+function makeSampleDebts() {
+  const t = todayKey();
+  const I = (d, desc, amount) => ({ id: uid(), date: addDays(t, -d), desc, amount, paid: false });
+  return [
+    { id: uid(), name: 'Bu Sri', note: 'Tetangga depan', items: [
+      I(5, 'Cilok goreng 4 porsi', 20000), I(2, 'Cilok goreng 3 porsi', 15000), I(1, 'Es teh manis 2 gelas', 6000)] },
+    { id: uid(), name: 'Pak Darto', note: 'Ojek pangkalan', items: [
+      I(4, 'Cilok goreng 2 porsi', 10000), I(1, 'Cilok goreng 3 porsi', 15000)] },
+    { id: uid(), name: 'Mas Rizki', note: 'Anak kos', items: [
+      I(3, 'Cilok goreng 4 porsi', 20000)] },
+  ];
+}
+const debtTotal = c => c.items.filter(i => !i.paid).reduce((s, i) => s + i.amount, 0);
+
+/* Stok bahan */
+const UNIT_ALIAS = { kilo: 'kg', kg: 'kg', liter: 'liter', lt: 'liter', l: 'liter', tabung: 'tabung', pak: 'pak', bal: 'bal',
+  bungkus: 'bungkus', bks: 'bungkus', pcs: 'buah', buah: 'buah', biji: 'buah', ons: 'ons', gram: 'gram', gr: 'gram', g: 'gram',
+  botol: 'botol', dus: 'dus', ikat: 'ikat', porsi: 'porsi', gelas: 'gelas', tusuk: 'tusuk', plastik: 'plastik' };
+const RE_QTY = /(\d+(?:[.,]\d+)?)\s*(kilo|kg|liter|lt|l|tabung|pak|bal|bungkus|bks|pcs|buah|biji|ons|gram|gr|g|botol|dus|ikat)(?![a-z])/;
+// Berapa yang masuk ke stok. Bahan per kg/liter memakai ukuran ("tepung 5 kg"),
+// bahan per tabung/pak memakai jumlah barang ("gas elpiji 3 kg" = 1 tabung).
+function stockQtyFor(s, size, sizeUnit, count) {
+  const mass = { kg: 1000, ons: 100, gram: 1 };
+  if (sizeUnit && sizeUnit === s.unit) return size * (count || 1);
+  if (sizeUnit && mass[sizeUnit] && mass[s.unit]) return size * mass[sizeUnit] / mass[s.unit] * (count || 1);
+  if (mass[s.unit] || s.unit === 'liter') return null;     // ukurannya tidak jelas: biar pemilik isi sendiri
+  return count || (sizeUnit ? 1 : size) || 1;
+}
+
+function makeSampleStock() {
+  const t = todayKey();
+  const H = (d, time, change, note) => ({ id: uid(), date: addDays(t, -d), time, change, note });
+  const S = (name, unit, qty, min, keywords, history) => ({ id: uid(), name, unit, qty, min, keywords, history });
+  return [
+    S('Tepung tapioka', 'kg', 7, 5, ['tepung', 'tapioka', 'aci'], [H(0, '08:00', -2, 'Dipakai'), H(1, '08:00', -2, 'Dipakai'), H(2, '07:10', 5, 'Belanja: Tepung tapioka 5 kg')]),
+    S('Daging ayam giling', 'kg', 0.5, 1, ['daging', 'ayam'], [H(0, '08:00', -0.5, 'Dipakai'), H(1, '07:15', 1, 'Belanja: Daging ayam giling 1 kg')]),
+    S('Minyak goreng', 'liter', 3, 2, ['minyak'], [H(0, '07:05', 2, 'Belanja: Minyak goreng 2 liter'), H(1, '17:00', -1, 'Dipakai')]),
+    S('Gas elpiji 3 kg', 'tabung', 1, 1, ['gas', 'elpiji', 'lpg'], [H(2, '07:25', 1, 'Belanja: Gas elpiji 3 kg')]),
+    S('Bumbu kacang', 'kg', 1, 0.5, ['bumbu', 'kacang'], [H(1, '16:00', -0.5, 'Dipakai'), H(3, '07:30', 1.5, 'Belanja: Bumbu kacang & cabai')]),
+    S('Plastik kemasan', 'pak', 3, 1, ['plastik', 'kantong', 'kemasan'], [H(4, '08:10', 2, 'Belanja: Plastik & tusuk sate')]),
+    S('Tusuk sate', 'pak', 0, 1, ['tusuk'], [H(0, '09:00', -1, 'Dipakai'), H(4, '08:10', 1, 'Belanja: Plastik & tusuk sate')]),
+  ];
+}
+const stockStatus = s => s.qty <= 0 ? 'habis' : s.qty <= s.min ? 'hampir' : 'aman';
+const STATUS_UI = {
+  aman: { label: 'Aman', badge: 'bg-blue-50 text-blue-800', bar: 'bg-blue-500' },
+  hampir: { label: 'Hampir habis', badge: 'bg-amber-100 text-amber-900', bar: 'bg-amber-500' },
+  habis: { label: 'Habis', badge: 'bg-rose-100 text-rose-800', bar: 'bg-rose-500' },
+};
+const STATUS_ORDER = { habis: 0, hampir: 1, aman: 2 };
+const stockKeywords = name => name.toLowerCase().split(/[^a-z]+/).filter(w => w.length >= 3);
+function matchStock(text, stock) {
+  const t = text.toLowerCase();
+  return stock.find(s => (s.keywords && s.keywords.length ? s.keywords : stockKeywords(s.name))
+    .some(k => new RegExp(`(^|[^a-z])${k}`).test(t))) || null;
+}
+
+/* =========================================================
+   "AI" tiruan: aturan sederhana untuk membaca pesan
+   ========================================================= */
+const RE_IN = /(jual|laku|laris)/;
+const RE_OUT = /(beli|bayar|belanja)/;
+const RE_AMOUNT = /(rp\.?\s*)?(\d+(?:[.,]\d+)*)\s*(ribu|rbu|rb|k|juta|jt)?(?![a-z0-9])/gi;
+const CAT_RULES_OUT = [
+  [/(tepung|tapioka|aci|terigu|daging|ayam|ikan|telur|bumbu|cabai|cabe|bawang|kacang|kecap|saus|minyak|gula|garam|beras|sayur|teh|es batu|bahan)/, 'Bahan baku'],
+  [/(gas|elpiji|lpg|listrik|token|pdam|air|plastik|kantong|tusuk|kemasan|mika|bensin|bbm|ongkir|ojek|parkir|sabun|kertas|tinta)/, 'Operasional'],
+  [/(gaji|upah|karyawan|pegawai)/, 'Gaji'],
+  [/(sewa|kontrak|lapak)/, 'Sewa'],
+];
+
+function detectType(t) {
+  const a = t.search(RE_IN), b = t.search(RE_OUT);
+  if (a < 0 && b < 0) return null;
+  if (a < 0) return 'keluar';
+  if (b < 0) return 'masuk';
+  return a < b ? 'masuk' : 'keluar';
+}
+
+function findAmount(t) {
+  let best = null;
+  for (const m of t.matchAll(RE_AMOUNT)) {
+    const [whole, rp, numStr, suf] = m;
+    let val = null;
+    if (suf) {
+      const isDecimal = /^\d+[.,]\d{1,2}$/.test(numStr);
+      const n = isDecimal ? parseFloat(numStr.replace(',', '.')) : Number(numStr.replace(/[.,]/g, ''));
+      val = n * (/^(ribu|rbu|rb|k)$/i.test(suf) ? 1000 : 1000000);
+    } else {
+      const plain = Number(numStr.replace(/[.,]/g, ''));
+      if (rp || /[.,]\d{3}/.test(numStr) || plain >= 1000) val = plain;
+    }
+    if (val) best = { value: Math.round(val), index: m.index, length: whole.length };
+  }
+  return best;
+}
+
+function guessCategory(type, text, cats) {
+  let c;
+  if (type === 'masuk') c = /(pesanan|pesan|order|katering|arisan|hajatan)/.test(text) ? 'Pesanan' : 'Penjualan';
+  else c = (CAT_RULES_OUT.find(([re]) => re.test(text)) || [null, 'Lain-lain'])[1];
+  const list = cats[type];
+  return list.includes(c) ? c : (list.includes('Lain-lain') ? 'Lain-lain' : list[0]);
+}
+
+// Ubah angka berbentuk kata (hasil input suara) jadi angka: "lima puluh ribu" -> "50000"
+const NUM_WORDS = { nol: 0, satu: 1, dua: 2, tiga: 3, empat: 4, lima: 5, enam: 6, tujuh: 7, delapan: 8, sembilan: 9,
+  sepuluh: 10, sebelas: 11, seratus: 100, seribu: 1000, sejuta: 1000000, setengah: 0.5 };
+function normalizeNumberWords(text) {
+  const tokens = text.split(/\s+/), out = [];
+  const word = tok => tok.replace(/[^a-z]/g, '');
+  let i = 0;
+  while (i < tokens.length) {
+    if (!(word(tokens[i]) in NUM_WORDS)) { out.push(tokens[i]); i++; continue; }
+    let total = 0, cur = 0, last = 0, trail = '', j = i;
+    for (; j < tokens.length; j++) {
+      const x = word(tokens[j]);
+      if (x in NUM_WORDS) {
+        const v = NUM_WORDS[x];
+        if (v >= 1000) { total += (cur || 1) * v; cur = 0; last = 0; } else { cur += v; last = v; }
+      } else if (x === 'belas') { cur += 10; last += 10; }
+      else if (x === 'puluh' || x === 'ratus') { const k = x === 'puluh' ? 10 : 100; cur = cur - last + last * k; last = 0; }
+      else if (x === 'ribu' || x === 'juta') { total += (cur || 1) * (x === 'ribu' ? 1000 : 1000000); cur = 0; last = 0; }
+      else break;
+      trail = tokens[j].replace(/^[a-z]+/, '');
+    }
+    out.push(String(total + cur) + trail);
+    i = j;
+  }
+  return out.join(' ');
+}
+
+function parseMessage(raw, cats) {
+  const t = normalizeNumberWords(raw.toLowerCase().replace(/\s+/g, ' ').trim());
+  const type = detectType(t);
+  const amt = findAmount(t);
+
+  // tanggal
+  let date = todayKey();
+  const ago = t.match(/(\d+)\s*hari\s*(yang\s*)?lalu/);
+  if (/kemarin/.test(t)) date = addDays(date, -1);
+  else if (ago) date = addDays(date, -Number(ago[1]));
+
+  // nama barang = sisa kalimat
+  let rest = amt ? t.slice(0, amt.index) + ' ' + t.slice(amt.index + amt.length) : t;
+  const qm = rest.match(RE_QTY);
+  let qty = qm ? toNum(qm[1]) : null, unit = qm ? UNIT_ALIAS[qm[2]] : null;
+  rest = rest
+    .replace(/\d+\s*hari\s*(yang\s*)?lalu/g, ' ')
+    .replace(/\b(kemarin|tadi pagi|tadi siang|tadi sore|tadi malam|tadi|barusan|hari ini)\b/g, ' ')
+    .replace(/\b\w*(jual|laku|laris|beli|bayar|belanja)\w*\b/g, ' ')
+    .replace(/\b(rp|seharga|harga|total|sebesar|senilai|semua|dong|ya|sih|aja|saja)\b/g, ' ')
+    .replace(/[,.;:!?]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let item = rest;
+  const q = rest.match(/^(\d+)\s*(porsi|bungkus|bks|gelas|tusuk|pcs|buah|biji|plastik|kg|kilo|liter|lt|bal|pak|dus|tabung)?\s+(.+)$/);
+  if (q) {
+    item = `${cap(q[3])} (${q[1]}${q[2] ? ' ' + q[2] : ''})`;
+    if (!qty) { qty = Number(q[1]); unit = q[2] ? (UNIT_ALIAS[q[2]] || q[2]) : null; }
+  }
+  else item = cap(rest);
+  if (!item) item = type === 'keluar' ? 'Belanja' : type === 'masuk' ? 'Penjualan' : '';
+
+  return {
+    type,
+    amount: amt ? amt.value : 0,
+    item,
+    date,
+    category: type ? guessCategory(type, t, cats) : null,
+    qty, unit,
+  };
+}
+
+/* =========================================================
+   Ikon (SVG garis)
+   ========================================================= */
+const ICONS = {
+  home: <><path d="M3 10.5 12 3l9 7.5" /><path d="M5 9v12h14V9" /><path d="M10 21v-6h4v6" /></>,
+  chat: <><path d="M21 12a8 8 0 0 1-11.7 7.1L4 20.5l1.4-4.9A8 8 0 1 1 21 12z" /><path d="M8.5 12h.01M12 12h.01M15.5 12h.01" /></>,
+  list: <><path d="M9 6h11M9 12h11M9 18h11" /><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01" /></>,
+  book: <><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z" /><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3" /><path d="M9 7.5h6M9 11h4" /></>,
+  user: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></>,
+  send: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
+  plus: <><path d="M12 5v14M5 12h14" /></>,
+  x: <><path d="M6 6l12 12M18 6 6 18" /></>,
+  back: <path d="m15 5-7 7 7 7" />,
+  right: <path d="m9 5 7 7-7 7" />,
+  search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></>,
+  edit: <><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="m13.5 6.5 4 4" /></>,
+  trash: <><path d="M4 7h16M10 11v6M14 11v6" /><path d="M6 7l1 13h10l1-13M9 7V4h6v3" /></>,
+  check: <path d="m5 12.5 4.5 4.5L19 7.5" />,
+  checkCircle: <><circle cx="12" cy="12" r="9" /><path d="m8 12.5 3 3 5-6" /></>,
+  calendar: <><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M3.5 10h17M8 3v4M16 3v4" /></>,
+  arrowIn: <><path d="M17 7 7 17" /><path d="M16 17H7V8" /></>,
+  arrowOut: <><path d="M7 17 17 7" /><path d="M8 7h9v9" /></>,
+  eye: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></>,
+  eyeOff: <><path d="M3 3l18 18" /><path d="M10.6 5.1A10.5 10.5 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a10 10 0 0 0 5.4-1.6" /><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" /></>,
+  logout: <><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" /><path d="M10 17l-5-5 5-5M5 12h11" /></>,
+  store: <><path d="M4 9.5 5.5 4h13L20 9.5" /><path d="M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0" /><path d="M5.5 12v8h13v-8" /></>,
+  tag: <><path d="M3 12V4h8l10 10-8 8z" /><circle cx="7.5" cy="8" r="1.3" /></>,
+  form: <><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></>,
+  wallet: <><path d="M4 7h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /><path d="M4 7V6a2 2 0 0 1 2-2h10v3" /><path d="M16 13.5h.01" /></>,
+  sparkle: <><path d="M12 3.5 13.8 9 19.5 11l-5.7 2-1.8 5.5-1.8-5.5L4.5 11l5.7-2z" /></>,
+  refresh: <><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></>,
+  box: <><path d="M3.5 7.5 12 3l8.5 4.5v9L12 21l-8.5-4.5z" /><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9" /></>,
+  alert: <><path d="M12 4 2.5 20h19z" /><path d="M12 10v4M12 17h.01" /></>,
+  minus: <path d="M5 12h14" />,
+  camera: <><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" /><circle cx="12" cy="13.5" r="3.5" /></>,
+  mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" /></>,
+};
+const Icon = ({ name, className = 'w-6 h-6', sw = 2 }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={sw} strokeLinecap="round"
+       strokeLinejoin="round" className={className} aria-hidden="true">{ICONS[name]}</svg>
+);
+
+/* =========================================================
+   Komponen dasar
+   ========================================================= */
+const BTN = 'h-12 rounded-xl font-semibold text-base inline-flex items-center justify-center gap-2 transition active:scale-[.98] disabled:opacity-50 disabled:active:scale-100';
+const BTN_PRIMARY = `${BTN} bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800`;
+const BTN_SECONDARY = `${BTN} bg-white text-slate-800 border border-slate-300 hover:bg-slate-50`;
+const BTN_DANGER = `${BTN} bg-white text-rose-700 border border-rose-300 hover:bg-rose-50`;
+const INPUT = 'h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500';
+
+function Field({ label, error, hint, children }) {
+  return (
+    <label className="block">
+      <span className="block text-sm font-semibold text-slate-700 mb-1.5">{label}</span>
+      {children}
+      {error ? <span className="block text-sm text-rose-700 mt-1">{error}</span>
+        : hint ? <span className="block text-sm text-slate-500 mt-1">{hint}</span> : null}
+    </label>
+  );
+}
+
+function PasswordInput({ value, onChange, placeholder }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative">
+      <input type={show ? 'text' : 'password'} className={`${INPUT} pr-12`} value={value}
+             onChange={e => onChange(e.target.value)} placeholder={placeholder} />
+      <button type="button" onClick={() => setShow(s => !s)} aria-label={show ? 'Sembunyikan kata sandi' : 'Lihat kata sandi'}
+              className="absolute right-0 top-0 h-12 w-12 grid place-items-center text-slate-500">
+        <Icon name={show ? 'eyeOff' : 'eye'} className="w-5 h-5" />
+      </button>
+    </div>
+  );
+}
+
+function Chip({ active, onClick, children, className = '' }) {
+  return (
+    <button type="button" onClick={onClick} aria-pressed={active}
+            className={`h-11 px-4 rounded-full text-sm font-semibold whitespace-nowrap border transition ${active
+              ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'} ${className}`}>
+      {children}
+    </button>
+  );
+}
+
+function PageHeader({ title, subtitle, onBack, right }) {
+  return (
+    <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200">
+      <div className="h-16 px-2 flex items-center gap-1">
+        {onBack ? (
+          <button onClick={onBack} aria-label="Kembali" className="w-11 h-11 grid place-items-center rounded-full hover:bg-slate-100">
+            <Icon name="back" />
+          </button>
+        ) : <span className="w-2" />}
+        <div className="flex-1 min-w-0">
+          <h1 className="text-lg font-bold leading-tight truncate">{title}</h1>
+          {subtitle && <p className="text-xs text-slate-500 truncate">{subtitle}</p>}
+        </div>
+        {right}
+      </div>
+    </header>
+  );
+}
+
+function Sheet({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="absolute inset-0 bg-slate-900/50" onClick={onClose} />
+      <div className="sheet-in relative w-full max-w-[420px] bg-white rounded-t-3xl max-h-[92vh] overflow-y-auto">
+        <div className="sticky top-0 z-10 bg-white rounded-t-3xl">
+          <div className="mx-auto mt-2 h-1.5 w-10 rounded-full bg-slate-300" />
+          <div className="flex items-center justify-between pl-5 pr-2 py-1">
+            <h2 className="text-lg font-bold">{title}</h2>
+            <button onClick={onClose} aria-label="Tutup" className="w-11 h-11 grid place-items-center rounded-full hover:bg-slate-100">
+              <Icon name="x" />
+            </button>
+          </div>
+        </div>
+        <div className="px-5 pb-6 pt-1">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({ c, onClose }) {
+  const [checked, setChecked] = useState(c.checkbox ? c.checkbox.value : false);
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-5" role="alertdialog" aria-modal="true">
+      <div className="absolute inset-0 bg-slate-900/50" onClick={onClose} />
+      <div className="pop-in relative w-full max-w-[360px] bg-white rounded-2xl p-5 shadow-xl">
+        <h2 className="text-lg font-bold">{c.title}</h2>
+        {c.message && <p className="mt-2 text-slate-600">{c.message}</p>}
+        {c.checkbox && (
+          <label className="mt-4 flex items-start gap-3 p-3 rounded-xl bg-slate-50 cursor-pointer">
+            <input type="checkbox" className="mt-0.5 w-5 h-5 accent-blue-600" checked={checked}
+                   onChange={e => setChecked(e.target.checked)} />
+            <span className="text-sm text-slate-700">{c.checkbox.label}</span>
+          </label>
+        )}
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <button className={BTN_SECONDARY} onClick={onClose}>Batal</button>
+          <button className={c.danger ? `${BTN} bg-rose-600 text-white hover:bg-rose-700` : BTN_PRIMARY}
+                  onClick={() => { c.onConfirm(checked); onClose(); }}>{c.confirmText || 'Ya'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ icon, title, text, action }) {
+  return (
+    <div className="flex flex-col items-center text-center px-8 py-14">
+      <div className="w-20 h-20 rounded-full bg-blue-50 text-blue-600 grid place-items-center">
+        <Icon name={icon} className="w-10 h-10" sw={1.6} />
+      </div>
+      <h2 className="mt-4 text-lg font-bold">{title}</h2>
+      <p className="mt-1 text-slate-600">{text}</p>
+      {action && <div className="mt-6 w-full max-w-[260px]">{action}</div>}
+    </div>
+  );
+}
+
+function Logo({ size = 'md' }) {
+  const s = size === 'lg' ? 'w-12 h-12 text-2xl' : 'w-9 h-9 text-lg';
+  return <div className={`${s} rounded-xl bg-blue-600 text-white font-extrabold grid place-items-center`}>J</div>;
+}
+
+/* Satu baris transaksi, dipakai di Beranda & Riwayat */
+function TxRow({ tx, onClick, showDate }) {
+  const masuk = tx.type === 'masuk';
+  return (
+    <button onClick={onClick} className="w-full flex items-center gap-3 px-4 py-3 min-h-[64px] text-left hover:bg-slate-50 active:bg-slate-100">
+      <span className={`shrink-0 w-10 h-10 rounded-full grid place-items-center ${masuk ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+        <Icon name={masuk ? 'arrowIn' : 'arrowOut'} className="w-5 h-5" />
+      </span>
+      <span className="flex-1 min-w-0">
+        <span className="block font-semibold truncate">{tx.item}</span>
+        <span className="block text-sm text-slate-500 truncate">
+          {tx.category} · {showDate ? `${relDay(tx.date)}, ` : ''}{tx.time.replace(':', '.')}
+        </span>
+      </span>
+      <span className={`shrink-0 font-bold tabular-nums ${masuk ? 'text-emerald-700' : 'text-rose-700'}`}>
+        {signed(tx.type, tx.amount)}
+      </span>
+    </button>
+  );
+}
+
+/* =========================================================
+   Form transaksi (popup) — manual, ubah, & ubah hasil bacaan AI
+   ========================================================= */
+function TxForm({ modal, cats, stock = [], onClose }) {
+  const { mode, initial, onSave, onDelete } = modal;
+  const [f, setF] = useState(() => {
+    const type = initial.type || 'masuk';
+    return { type, item: '', amount: 0, date: todayKey(), ...initial, category: initial.category || cats[type][0],
+      stock: initial.stock ? { ...initial.stock, qty: String(initial.stock.qty).replace('.', ',') } : null };
+  });
+  const [err, setErr] = useState({});
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const setType = type => setF(p => ({ ...p, type, category: cats[type].includes(p.category) ? p.category : cats[type][0] }));
+  const catList = cats[f.type].includes(f.category) ? cats[f.type] : [...cats[f.type], f.category];
+  const title = mode === 'edit' ? 'Ubah transaksi' : mode === 'draft' ? 'Ubah hasil bacaan' : 'Catat manual';
+  const t = todayKey();
+  // Belanja bahan bisa sekalian menambah stok (tidak untuk mengubah transaksi lama)
+  const showStock = mode !== 'edit' && f.type === 'keluar' && stock.length > 0;
+  const stockItem = f.stock && stock.find(s => s.id === f.stock.itemId);
+  const toggleStock = on => set('stock', on ? { itemId: f.stockMatch || stock[0].id, qty: '' } : null);
+  const setStockField = (k, v) => setF(p => ({ ...p, stock: { ...p.stock, [k]: v } }));
+
+  const submit = e => {
+    e.preventDefault();
+    const er = {};
+    if (!f.item.trim()) er.item = 'Isi nama barang atau keterangan dulu.';
+    if (!f.amount) er.amount = 'Isi nominalnya dulu.';
+    if (!f.date) er.date = 'Pilih tanggalnya.';
+    const useStock = showStock && f.stock;
+    if (useStock && !toNum(f.stock.qty)) er.stock = 'Isi jumlah yang masuk ke stok.';
+    setErr(er);
+    if (Object.keys(er).length) return;
+    onSave({ ...f, item: f.item.trim(), stock: useStock ? { itemId: f.stock.itemId, qty: toNum(f.stock.qty) } : null });
+    onClose();
+  };
+
+  return (
+    <Sheet title={title} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-5">
+        <div>
+          <span className="block text-sm font-semibold text-slate-700 mb-1.5">Jenis</span>
+          <div className="grid grid-cols-2 gap-2" role="radiogroup">
+            {[['masuk', '+', 'Uang masuk'], ['keluar', '−', 'Uang keluar']].map(([k, s, l]) => {
+              const on = f.type === k;
+              const color = k === 'masuk' ? 'border-emerald-600 bg-emerald-50 text-emerald-800' : 'border-rose-600 bg-rose-50 text-rose-800';
+              return (
+                <button type="button" key={k} role="radio" aria-checked={on} onClick={() => setType(k)}
+                        className={`h-14 rounded-xl border-2 font-semibold flex items-center justify-center gap-2 ${on ? color : 'border-slate-200 text-slate-600'}`}>
+                  <span className="text-xl font-bold leading-none">{s}</span>{l}
+                  {on && <Icon name="check" className="w-5 h-5" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <Field label="Barang / keterangan" error={err.item}>
+          <input className={INPUT} value={f.item} onChange={e => set('item', e.target.value)}
+                 placeholder={f.type === 'masuk' ? 'Contoh: Cilok goreng 10 porsi' : 'Contoh: Tepung tapioka 5 kg'} />
+        </Field>
+
+        <Field label="Nominal" error={err.amount}>
+          <div className="relative">
+            <span className="absolute left-4 top-1/2 -translate-y-1/2 font-semibold text-slate-500">Rp</span>
+            <input className={`${INPUT} pl-11 text-lg font-bold tabular-nums`} inputMode="numeric" placeholder="0"
+                   value={f.amount ? f.amount.toLocaleString('id-ID') : ''}
+                   onChange={e => set('amount', Number(e.target.value.replace(/\D/g, '').slice(0, 11)))} />
+          </div>
+        </Field>
+
+        <div>
+          <span className="block text-sm font-semibold text-slate-700 mb-1.5">Kategori</span>
+          <div className="flex flex-wrap gap-2">
+            {catList.map(c => <Chip key={c} active={f.category === c} onClick={() => set('category', c)}>{c}</Chip>)}
+          </div>
+        </div>
+
+        <Field label="Tanggal" error={err.date}>
+          <div className="flex gap-2 mb-2">
+            <Chip active={f.date === t} onClick={() => set('date', t)}>Hari ini</Chip>
+            <Chip active={f.date === addDays(t, -1)} onClick={() => set('date', addDays(t, -1))}>Kemarin</Chip>
+          </div>
+          <input type="date" className={INPUT} value={f.date} max={t} onChange={e => set('date', e.target.value)} />
+        </Field>
+
+        {showStock && (
+          <div className="rounded-xl border border-slate-200 p-3">
+            <label className="flex items-center justify-between gap-3 min-h-[44px] cursor-pointer">
+              <span>
+                <span className="font-semibold flex items-center gap-1.5"><Icon name="box" className="w-5 h-5 text-blue-700" />Tambah ke stok bahan</span>
+                <span className="block text-sm text-slate-500">Untuk belanja bahan yang disimpan</span>
+              </span>
+              <input type="checkbox" className="w-6 h-6 accent-blue-600 shrink-0" checked={!!f.stock} onChange={e => toggleStock(e.target.checked)} />
+            </label>
+            {f.stock && (
+              <div className="mt-2 grid grid-cols-[1fr_128px] gap-2">
+                <select className={INPUT} value={f.stock.itemId} onChange={e => setStockField('itemId', e.target.value)} aria-label="Bahan">
+                  {stock.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <div className="relative">
+                  <input className={`${INPUT} pr-16 tabular-nums`} inputMode="decimal" placeholder="0" value={f.stock.qty} aria-label="Jumlah masuk stok"
+                         onChange={e => setStockField('qty', e.target.value.replace(/[^\d.,]/g, ''))} />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-500">{stockItem ? stockItem.unit : ''}</span>
+                </div>
+              </div>
+            )}
+            {err.stock && <span className="block text-sm text-rose-700 mt-1">{err.stock}</span>}
+          </div>
+        )}
+
+        <div className={`grid gap-2 pt-1 ${mode === 'edit' ? 'grid-cols-[auto_1fr]' : 'grid-cols-1'}`}>
+          {mode === 'edit' && (
+            <button type="button" className={`${BTN_DANGER} px-4`} onClick={onDelete}>
+              <Icon name="trash" className="w-5 h-5" />Hapus
+            </button>
+          )}
+          <button type="submit" className={BTN_PRIMARY}>
+            <Icon name="check" className="w-5 h-5" />Simpan
+          </button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+/* =========================================================
+   Form tambah bon
+   ========================================================= */
+function BonForm({ modal, debts, onSave, onClose }) {
+  const [f, setF] = useState({ name: modal.name || '', desc: '', amount: 0, date: todayKey() });
+  const [err, setErr] = useState({});
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const names = debts.map(d => d.name);
+  const submit = e => {
+    e.preventDefault();
+    const er = {};
+    if (!f.name.trim()) er.name = 'Isi nama pelanggan.';
+    if (!f.amount) er.amount = 'Isi jumlah utangnya.';
+    setErr(er);
+    if (Object.keys(er).length) return;
+    onSave({ ...f, name: f.name.trim(), desc: f.desc.trim() || 'Utang' });
+    onClose();
+  };
+  return (
+    <Sheet title={modal.name ? `Tambah utang ${modal.name}` : 'Tambah bon'} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-5">
+        {!modal.name && (
+          <Field label="Nama pelanggan" error={err.name}>
+            <input className={INPUT} value={f.name} onChange={e => set('name', e.target.value)} placeholder="Contoh: Bu Sri" />
+            {names.length > 0 && (
+              <div className="flex gap-2 mt-2 overflow-x-auto no-scrollbar">
+                {names.map(n => <Chip key={n} active={f.name.toLowerCase() === n.toLowerCase()} onClick={() => set('name', n)}>{n}</Chip>)}
+              </div>
+            )}
+          </Field>
+        )}
+        <Field label="Untuk apa" hint="Boleh dikosongkan">
+          <input className={INPUT} value={f.desc} onChange={e => set('desc', e.target.value)} placeholder="Contoh: Cilok goreng 3 porsi" />
+        </Field>
+        <Field label="Jumlah utang" error={err.amount}>
+          <div className="relative">
+            <span className="absolute left-4 top-1/2 -translate-y-1/2 font-semibold text-slate-500">Rp</span>
+            <input className={`${INPUT} pl-11 text-lg font-bold tabular-nums`} inputMode="numeric" placeholder="0"
+                   value={f.amount ? f.amount.toLocaleString('id-ID') : ''}
+                   onChange={e => set('amount', Number(e.target.value.replace(/\D/g, '').slice(0, 11)))} />
+          </div>
+        </Field>
+        <Field label="Tanggal">
+          <input type="date" className={INPUT} value={f.date} max={todayKey()} onChange={e => set('date', e.target.value)} />
+        </Field>
+        <button type="submit" className={`${BTN_PRIMARY} w-full`}><Icon name="check" className="w-5 h-5" />Simpan bon</button>
+      </form>
+    </Sheet>
+  );
+}
+
+/* =========================================================
+   HALAMAN SEBELUM LOGIN
+   ========================================================= */
+function AuthShell({ children }) {
+  return <div className="mx-auto max-w-[420px] min-h-screen bg-white sm:shadow-xl sm:shadow-slate-300/40">{children}</div>;
+}
+
+function Landing({ go }) {
+  return (
+    <AuthShell>
+      <div className="min-h-screen flex flex-col">
+        <div className="px-5 pt-6 flex items-center gap-2.5">
+          <Logo /><span className="text-xl font-extrabold tracking-tight">Jualans</span>
+        </div>
+
+        <div className="px-5 pt-8">
+          <h1 className="text-[28px] leading-tight font-extrabold">Catat jualan semudah kirim chat.</h1>
+          <p className="mt-3 text-slate-600 text-[17px]">
+            Tidak perlu isi form. Ketik, ucapkan, atau foto nota belanja. Jualans yang merapikan jadi catatan uang masuk dan uang keluar.
+          </p>
+        </div>
+
+        {/* Contoh cara mencatat */}
+        <div className="mx-5 mt-7 rounded-3xl bg-slate-100 p-4 space-y-3" aria-label="Contoh mencatat lewat chat">
+          <div className="flex justify-end">
+            <div className="bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2.5">jual 10 cilok 50rb</div>
+          </div>
+          <div className="bg-white rounded-2xl p-3.5 shadow-sm max-w-[270px]">
+            <div className="text-xs font-semibold text-emerald-800">Uang masuk (+) · Penjualan</div>
+            <div className="mt-1 flex items-baseline justify-between gap-2">
+              <span className="font-semibold">Cilok (10)</span>
+              <span className="font-bold text-emerald-700">+Rp50.000</span>
+            </div>
+          </div>
+          <div className="flex justify-end">
+            <div className="bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2.5">beli tepung tapioka 65rb</div>
+          </div>
+          <div className="bg-white rounded-2xl p-3.5 shadow-sm max-w-[270px]">
+            <div className="text-xs font-semibold text-rose-800">Uang keluar (−) · Bahan baku</div>
+            <div className="mt-1 flex items-baseline justify-between gap-2">
+              <span className="font-semibold">Tepung tapioka</span>
+              <span className="font-bold text-rose-700">−Rp65.000</span>
+            </div>
+          </div>
+        </div>
+
+        <ul className="px-5 mt-7 space-y-4">
+          {[
+            ['wallet', 'Tahu untung setiap hari', 'Uang masuk, uang keluar, dan untung langsung terlihat.'],
+            ['book', 'Catat bon pelanggan', 'Tidak lupa lagi siapa yang belum bayar.'],
+            ['box', 'Pantau stok bahan', 'Diingatkan sebelum tepung atau gas habis.'],
+            ['store', 'Cocok untuk usaha kecil', 'Warung makan, laundry kiloan, fotokopi, jajanan.'],
+          ].map(([ic, t, d]) => (
+            <li key={t} className="flex gap-3">
+              <span className="shrink-0 w-11 h-11 rounded-xl bg-blue-50 text-blue-700 grid place-items-center"><Icon name={ic} className="w-5 h-5" /></span>
+              <span><span className="block font-semibold">{t}</span><span className="block text-slate-600 text-sm">{d}</span></span>
+            </li>
+          ))}
+        </ul>
+
+        <div className="flex-1" />
+        <div className="sticky bottom-0 bg-white px-5 pt-4 pb-6 mt-6 border-t border-slate-100 space-y-2">
+          <button className={`${BTN_PRIMARY} w-full`} onClick={() => go('daftar')}>Daftar gratis</button>
+          <button className={`${BTN_SECONDARY} w-full`} onClick={() => go('login')}>Login</button>
+        </div>
+      </div>
+    </AuthShell>
+  );
+}
+
+function Register({ go, setUser }) {
+  const [f, setF] = useState({ name: '', contact: '', pass: '' });
+  const submit = e => {
+    e.preventDefault();
+    setUser({ name: f.name.trim() || 'Rina', contact: f.contact.trim() || '0812-3456-7890' });
+    go('setup');
+  };
+  return (
+    <AuthShell>
+      <PageHeader title="Daftar akun" onBack={() => go('landing')} />
+      <form onSubmit={submit} className="px-5 py-6 space-y-5">
+        <p className="text-slate-600">Gratis. Cukup isi tiga hal ini.</p>
+        <Field label="Nama kamu">
+          <input className={INPUT} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="Contoh: Rina" autoComplete="name" />
+        </Field>
+        <Field label="Nomor HP atau email">
+          <input className={INPUT} value={f.contact} onChange={e => setF({ ...f, contact: e.target.value })} placeholder="0812xxxx atau nama@email.com" autoComplete="username" />
+        </Field>
+        <Field label="Kata sandi" hint="Minimal 6 huruf atau angka">
+          <PasswordInput value={f.pass} onChange={v => setF({ ...f, pass: v })} placeholder="Buat kata sandi" />
+        </Field>
+        <button className={`${BTN_PRIMARY} w-full`} type="submit">Daftar</button>
+        <p className="text-center text-slate-600">
+          Sudah punya akun?{' '}
+          <button type="button" className="font-semibold text-blue-700 h-11 px-1" onClick={() => go('login')}>Login</button>
+        </p>
+      </form>
+    </AuthShell>
+  );
+}
+
+const BIZ_TYPES = ['Cilok goreng', 'Warung makan', 'Laundry kiloan', 'Fotokopi', 'Toko kelontong', 'Lainnya'];
+
+function Setup({ biz, setBiz, user, onDone }) {
+  const [name, setName] = useState(biz.name);
+  const [type, setType] = useState(BIZ_TYPES.includes(biz.type) ? biz.type : 'Lainnya');
+  const [other, setOther] = useState(BIZ_TYPES.includes(biz.type) ? '' : biz.type);
+  const submit = e => {
+    e.preventDefault();
+    setBiz({ name: name.trim() || 'Usaha saya', type: type === 'Lainnya' ? (other.trim() || 'Lainnya') : type });
+    onDone();
+  };
+  return (
+    <AuthShell>
+      <form onSubmit={submit} className="px-5 py-8 space-y-6">
+        <div>
+          <p className="text-sm font-semibold text-blue-700">Satu langkah lagi</p>
+          <h1 className="mt-1 text-2xl font-extrabold">Halo {user.name}, ceritakan usahamu</h1>
+          <p className="mt-1 text-slate-600">Supaya kategori catatan sesuai dengan usahamu.</p>
+        </div>
+        <Field label="Nama usaha">
+          <input className={INPUT} value={name} onChange={e => setName(e.target.value)} placeholder="Contoh: Warung Bu Rina" />
+        </Field>
+        <div>
+          <span className="block text-sm font-semibold text-slate-700 mb-1.5">Jenis usaha</span>
+          <div className="grid grid-cols-2 gap-2" role="radiogroup">
+            {BIZ_TYPES.map(t => (
+              <button type="button" key={t} role="radio" aria-checked={type === t} onClick={() => setType(t)}
+                      className={`min-h-[52px] px-3 rounded-xl border-2 text-left font-semibold flex items-center justify-between gap-2 ${type === t ? 'border-blue-600 bg-blue-50 text-blue-800' : 'border-slate-200 text-slate-700'}`}>
+                {t}{type === t && <Icon name="check" className="w-5 h-5 shrink-0" />}
+              </button>
+            ))}
+          </div>
+          {type === 'Lainnya' && (
+            <input className={`${INPUT} mt-2`} value={other} onChange={e => setOther(e.target.value)} placeholder="Tulis jenis usahamu" autoFocus />
+          )}
+        </div>
+        <button className={`${BTN_PRIMARY} w-full`} type="submit">Mulai mencatat</button>
+      </form>
+    </AuthShell>
+  );
+}
+
+function Login({ go, onLogin, setToast }) {
+  const [f, setF] = useState({ contact: '', pass: '' });
+  return (
+    <AuthShell>
+      <PageHeader title="Login" onBack={() => go('landing')} />
+      <form onSubmit={e => { e.preventDefault(); onLogin(); }} className="px-5 py-6 space-y-5">
+        <p className="text-slate-600">Selamat datang lagi. Masukkan akunmu.</p>
+        <Field label="Nomor HP atau email">
+          <input className={INPUT} value={f.contact} onChange={e => setF({ ...f, contact: e.target.value })} placeholder="0812xxxx atau nama@email.com" autoComplete="username" />
+        </Field>
+        <Field label="Kata sandi">
+          <PasswordInput value={f.pass} onChange={v => setF({ ...f, pass: v })} placeholder="Kata sandi" />
+        </Field>
+        <div className="-mt-2 text-right">
+          <button type="button" className="h-11 px-1 text-sm font-semibold text-blue-700" onClick={() => setToast('Lupa kata sandi belum tersedia di prototipe')}>Lupa kata sandi?</button>
+        </div>
+        <button className={`${BTN_PRIMARY} w-full`} type="submit">Login</button>
+        <p className="text-center text-slate-600">
+          Belum punya akun?{' '}
+          <button type="button" className="font-semibold text-blue-700 h-11 px-1" onClick={() => go('daftar')}>Daftar</button>
+        </p>
+      </form>
+    </AuthShell>
+  );
+}
+
+/* =========================================================
+   BERANDA
+   ========================================================= */
+const PERIODS = [['hari', 'Hari ini'], ['minggu', 'Minggu ini'], ['bulan', 'Bulan ini']];
+
+function periodRange(p) {
+  const t = todayKey();
+  if (p === 'hari') return [t, t];
+  if (p === 'minggu') return [addDays(t, -6), t];
+  return [t.slice(0, 8) + '01', t];
+}
+
+function buildBuckets(p, txs) {
+  const t = todayKey();
+  const sum = list => ({ masuk: sumBy(list, 'masuk'), keluar: sumBy(list, 'keluar') });
+  if (p === 'hari') {
+    const today = txs.filter(x => x.date === t);
+    const h = x => Number(x.time.slice(0, 2));
+    return [
+      ['Pagi', 'Pagi (sebelum 11.00)', 0, 11], ['Siang', 'Siang (11.00–15.00)', 11, 15],
+      ['Sore', 'Sore (15.00–18.00)', 15, 18], ['Malam', 'Malam (setelah 18.00)', 18, 24],
+    ].map(([label, long, a, b]) => ({ label, long, ...sum(today.filter(x => h(x) >= a && h(x) < b)) }));
+  }
+  if (p === 'minggu') {
+    return Array.from({ length: 7 }, (_, i) => {
+      const k = addDays(t, i - 6);
+      return { label: i === 6 ? 'Ini' : HARI[fromKey(k).getDay()], long: relDay(k), ...sum(txs.filter(x => x.date === k)) };
+    });
+  }
+  const d = fromKey(t);
+  const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  const out = [];
+  for (let s = 1; s <= last; s += 7) {
+    const e = Math.min(s + 6, last);
+    const a = t.slice(0, 8) + pad(s), b = t.slice(0, 8) + pad(e);
+    out.push({ label: `${s}–${e}`, long: `${s}–${e} ${BULAN_PANJANG[d.getMonth()]}`, future: s > d.getDate(), ...sum(txs.filter(x => x.date >= a && x.date <= b)) });
+  }
+  return out;
+}
+
+function currentBucket(p) {
+  const d = new Date();
+  if (p === 'hari') { const h = d.getHours(); return h < 11 ? 0 : h < 15 ? 1 : h < 18 ? 2 : 3; }
+  if (p === 'minggu') return 6;
+  return Math.floor((d.getDate() - 1) / 7);
+}
+
+function BarChart({ buckets, sel, setSel }) {
+  const max = Math.max(1, ...buckets.map(b => Math.max(b.masuk, b.keluar)));
+  const h = v => v ? `${Math.max(4, (v / max) * 100)}%` : '0%';
+  const b = buckets[sel] || buckets[0];
+  return (
+    <div>
+      <div className="flex items-stretch gap-1 h-40" role="group" aria-label="Grafik uang masuk dan keluar">
+        {buckets.map((x, i) => (
+          <button key={i} onClick={() => setSel(i)} aria-pressed={sel === i}
+                  aria-label={`${x.long}: masuk ${rupiah(x.masuk)}, keluar ${rupiah(x.keluar)}`}
+                  className={`flex-1 min-w-0 flex flex-col rounded-xl pt-2 pb-1 transition ${sel === i ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${x.future ? 'opacity-40' : ''}`}>
+            <div className="flex-1 min-h-0 flex items-end justify-center gap-1 px-1 border-b border-slate-200">
+              <div className="w-1/3 max-w-[14px] rounded-t bg-emerald-500" style={{ height: h(x.masuk) }} />
+              <div className="w-1/3 max-w-[14px] rounded-t bg-rose-500" style={{ height: h(x.keluar) }} />
+            </div>
+            <span className={`mt-1 text-[11px] font-semibold ${sel === i ? 'text-blue-700' : 'text-slate-500'}`}>{x.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2.5 text-sm">
+        <div className="font-semibold text-slate-700">{b.long}</div>
+        <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
+          <span className="text-emerald-700 font-semibold">Masuk +{rupiah(b.masuk)}</span>
+          <span className="text-rose-700 font-semibold">Keluar −{rupiah(b.keluar)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Beranda({ biz, user, txs, debts, stock, go, openEditTx, openNewTx }) {
+  const [period, setPeriod] = useState('hari');
+  const buckets = useMemo(() => buildBuckets(period, txs), [period, txs]);
+  // Pilih bagian grafik terakhir yang sudah ada isinya (bukan yang kosong)
+  const defaultSel = () => {
+    const cur = currentBucket(period);
+    for (let i = cur; i >= 0; i--) if (buckets[i].masuk || buckets[i].keluar) return i;
+    return cur;
+  };
+  const [sel, setSel] = useState(defaultSel);
+  useEffect(() => setSel(defaultSel()), [period]);
+
+  const [a, b] = periodRange(period);
+  const inPeriod = txs.filter(x => x.date >= a && x.date <= b);
+  const masuk = sumBy(inPeriod, 'masuk'), keluar = sumBy(inPeriod, 'keluar'), untung = masuk - keluar;
+  const recent = sortTx(txs).slice(0, 5);
+  const openDebts = debts.filter(d => debtTotal(d) > 0);
+  const debtSum = openDebts.reduce((s, d) => s + debtTotal(d), 0);
+  const rangeText = period === 'hari' ? relDayFull(b) : `${fmtDate(a).replace(/ \d{4}$/, '')} – ${fmtDate(b)}`;
+  const jam = new Date().getHours();
+  const sapa = jam < 11 ? 'Selamat pagi' : jam < 15 ? 'Selamat siang' : jam < 18 ? 'Selamat sore' : 'Selamat malam';
+
+  return (
+    <div>
+      <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200">
+        <div className="h-16 pl-4 pr-2 flex items-center gap-3">
+          <Logo />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs text-slate-500 truncate">{sapa}, {user.name}</p>
+            <h1 className="text-lg font-bold leading-tight truncate">{biz.name}</h1>
+          </div>
+          <button onClick={() => go('pengaturan')} aria-label="Profil dan pengaturan"
+                  className="w-11 h-11 rounded-full bg-slate-100 text-slate-700 grid place-items-center hover:bg-slate-200">
+            <Icon name="user" className="w-5 h-5" />
+          </button>
+        </div>
+      </header>
+
+      <div className="px-4 pt-4 space-y-4">
+        {/* Pilihan periode */}
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100" role="tablist">
+          {PERIODS.map(([k, l]) => (
+            <button key={k} role="tab" aria-selected={period === k} onClick={() => setPeriod(k)}
+                    className={`h-11 rounded-lg text-sm font-semibold transition ${period === k ? 'bg-white shadow-sm text-blue-700' : 'text-slate-600'}`}>{l}</button>
+          ))}
+        </div>
+
+        {/* Ringkasan */}
+        <section className="rounded-2xl bg-blue-600 text-white p-4">
+          <div className="flex items-center justify-between text-sm text-blue-100">
+            <span>{untung < 0 ? 'Rugi' : 'Untung'}</span><span>{rangeText}</span>
+          </div>
+          <div className="mt-1 text-[34px] leading-tight font-extrabold tabular-nums">{signedNum(untung)}</div>
+          <p className="text-sm text-blue-100">Uang masuk dikurangi uang keluar</p>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <div className="rounded-xl bg-white p-3">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                <span className="w-5 h-5 rounded-full bg-emerald-50 text-emerald-700 grid place-items-center"><Icon name="arrowIn" className="w-3.5 h-3.5" sw={2.5} /></span>
+                Uang masuk
+              </div>
+              <div className="mt-1 text-lg font-bold text-emerald-700 tabular-nums">+{rupiah(masuk)}</div>
+            </div>
+            <div className="rounded-xl bg-white p-3">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                <span className="w-5 h-5 rounded-full bg-rose-50 text-rose-700 grid place-items-center"><Icon name="arrowOut" className="w-3.5 h-3.5" sw={2.5} /></span>
+                Uang keluar
+              </div>
+              <div className="mt-1 text-lg font-bold text-rose-700 tabular-nums">−{rupiah(keluar)}</div>
+            </div>
+          </div>
+        </section>
+
+        {/* Grafik */}
+        <section className="rounded-2xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-bold">Grafik {PERIODS.find(p => p[0] === period)[1].toLowerCase()}</h2>
+            <div className="flex gap-3 text-xs text-slate-600">
+              <span className="flex items-center gap-1"><i className="w-2.5 h-2.5 rounded-sm bg-emerald-500" />Masuk (+)</span>
+              <span className="flex items-center gap-1"><i className="w-2.5 h-2.5 rounded-sm bg-rose-500" />Keluar (−)</span>
+            </div>
+          </div>
+          <BarChart buckets={buckets} sel={sel} setSel={setSel} />
+        </section>
+
+        {/* Bon */}
+        {openDebts.length > 0 && (
+          <button onClick={() => go('bon')} className="w-full rounded-2xl border border-slate-200 p-4 flex items-center gap-3 text-left hover:bg-slate-50">
+            <span className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 grid place-items-center"><Icon name="book" className="w-5 h-5" /></span>
+            <span className="flex-1 min-w-0">
+              <span className="block text-sm text-slate-600">Bon belum dibayar · {openDebts.length} pelanggan</span>
+              <span className="block font-bold text-lg tabular-nums">{rupiah(debtSum)}</span>
+            </span>
+            <Icon name="right" className="w-5 h-5 text-slate-400" />
+          </button>
+        )}
+
+        {/* Stok bahan */}
+        {(() => {
+          const low = stock.filter(s => stockStatus(s) !== 'aman')
+            .sort((a, b) => STATUS_ORDER[stockStatus(a)] - STATUS_ORDER[stockStatus(b)]);
+          return (
+            <button onClick={() => go('stok')} className="w-full rounded-2xl border border-slate-200 p-4 flex items-center gap-3 text-left hover:bg-slate-50">
+              <span className={`w-11 h-11 shrink-0 rounded-xl grid place-items-center ${low.length ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'}`}>
+                <Icon name={low.length ? 'alert' : 'box'} className="w-5 h-5" />
+              </span>
+              <span className="flex-1 min-w-0">
+                <span className="block text-sm text-slate-600">Stok bahan{low.length ? ` · ${low.length} perlu dibeli` : ''}</span>
+                <span className="block font-bold truncate">
+                  {!stock.length ? 'Belum ada bahan' : low.length ? low.map(s => s.name).join(', ') : 'Semua stok aman'}
+                </span>
+              </span>
+              <Icon name="right" className="w-5 h-5 text-slate-400 shrink-0" />
+            </button>
+          );
+        })()}
+
+        {/* Transaksi terakhir */}
+        <section className="rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="flex items-center justify-between pl-4 pr-2 pt-3 pb-1">
+            <h2 className="font-bold">Transaksi terakhir</h2>
+            {recent.length > 0 && <button onClick={() => go('riwayat')} className="h-11 px-2 text-sm font-semibold text-blue-700">Lihat semua</button>}
+          </div>
+          {recent.length === 0 ? (
+            <div className="px-4 pb-5 pt-2 text-slate-600">
+              Belum ada catatan. Coba ketuk <b>Catat</b> di bawah dan ketik, misalnya “jual 10 cilok 50rb”.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {recent.map(tx => <TxRow key={tx.id} tx={tx} showDate onClick={() => openEditTx(tx)} />)}
+            </div>
+          )}
+        </section>
+
+        <button onClick={openNewTx} className={`${BTN_SECONDARY} w-full`}>
+          <Icon name="form" className="w-5 h-5" />Catat manual pakai form
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   CATAT (chat)
+   ========================================================= */
+const EXAMPLES = ['jual 10 cilok 50rb', 'beli tepung tapioka 5kg 65rb', 'bayar gas 22 ribu', 'pakai tepung 2kg', 'cek stok', 'kemarin jual es teh 15 gelas 45rb'];
+
+const initialMessages = () => [
+  { id: uid(), from: 'bot', kind: 'text', text: 'Halo! Ketik transaksi seperti kirim chat, nanti saya ubah jadi catatan.' },
+  { id: uid(), from: 'bot', kind: 'text', text: 'Pakai kata “jual” untuk uang masuk, “beli” atau “bayar” untuk uang keluar, lalu sebut nominalnya. Contohnya ada di bawah, tinggal ketuk.' },
+  { id: uid(), from: 'bot', kind: 'text', text: 'Lagi sibuk? Tekan tombol mikrofon untuk bicara, atau tombol kamera untuk foto nota belanja. Untuk stok, ketik “pakai tepung 2kg”.' },
+];
+
+function ConfirmCard({ m, stock = [], onSave, onEdit, onCancel, go }) {
+  const d = m.draft, masuk = d.type === 'masuk';
+  const pending = m.status === 'pending', saved = m.status === 'saved', cancelled = m.status === 'cancelled';
+  const Row = ({ label, value }) => (
+    <div className="flex justify-between gap-3 py-2">
+      <dt className="text-slate-500">{label}</dt><dd className="font-semibold text-right">{value}</dd>
+    </div>
+  );
+  return (
+    <div className={`w-full max-w-[310px] rounded-2xl border bg-white shadow-sm overflow-hidden ${saved ? 'border-emerald-300' : 'border-slate-200'} ${cancelled ? 'opacity-60' : ''}`}>
+      <div className={`px-4 py-2.5 flex items-center justify-between text-sm font-semibold ${masuk ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+        <span className="flex items-center gap-1.5"><Icon name={masuk ? 'arrowIn' : 'arrowOut'} className="w-4 h-4" sw={2.5} />{masuk ? 'Uang masuk (+)' : 'Uang keluar (−)'}</span>
+        {saved && <span className="flex items-center gap-1 text-emerald-800"><Icon name="checkCircle" className="w-4 h-4" />Tersimpan</span>}
+        {cancelled && <span className="text-slate-600">Dibatalkan</span>}
+      </div>
+      <div className="px-4 pt-3">
+        <div className="text-xs text-slate-500">Nominal</div>
+        <div className={`text-[26px] leading-tight font-extrabold tabular-nums ${masuk ? 'text-emerald-700' : 'text-rose-700'} ${cancelled ? 'line-through' : ''}`}>{signed(d.type, d.amount)}</div>
+        <dl className="mt-1 text-sm divide-y divide-slate-100">
+          <Row label="Jenis" value={masuk ? 'Uang masuk' : 'Uang keluar'} />
+          <Row label="Barang" value={d.item} />
+          <Row label="Kategori" value={d.category} />
+          <Row label="Tanggal" value={relDayFull(d.date)} />
+          {d.stock && (() => {
+            const s = stock.find(x => x.id === d.stock.itemId);
+            return s ? <Row label="Masuk stok" value={`${s.name} +${fmtQty(d.stock.qty)} ${s.unit}`} /> : null;
+          })()}
+        </dl>
+      </div>
+      {pending && (
+        <div className="p-3 pt-2">
+          <div className="grid grid-cols-2 gap-2">
+            <button className={BTN_SECONDARY} onClick={onEdit}><Icon name="edit" className="w-5 h-5" />Ubah</button>
+            <button className={BTN_PRIMARY} onClick={onSave}><Icon name="check" className="w-5 h-5" />Simpan</button>
+          </div>
+          <button className="w-full h-11 mt-1 text-sm font-semibold text-slate-500" onClick={onCancel}>Batal, bukan ini</button>
+        </div>
+      )}
+      {saved && (
+        <button className="w-full h-11 border-t border-slate-100 text-sm font-semibold text-blue-700" onClick={() => go('riwayat')}>Lihat di Riwayat</button>
+      )}
+      {!pending && !saved && <div className="h-3" />}
+    </div>
+  );
+}
+
+/* Nota contoh untuk simulasi scan (prototipe belum membaca foto sungguhan) */
+const SAMPLE_RECEIPTS = [
+  { store: 'Toko Bahan Kue Sumber Rejeki', lines: [
+    { item: 'Tepung tapioka 5 kg', qty: 5, unit: 'kg', amount: 65000 },
+    { item: 'Bumbu kacang 1 kg', qty: 1, unit: 'kg', amount: 28000 },
+    { item: 'Plastik kemasan 2 pak', qty: 2, unit: 'pak', amount: 24000 }] },
+  { store: 'Kios Pak Ujang, Pasar Kosambi', lines: [
+    { item: 'Daging ayam giling 1 kg', qty: 1, unit: 'kg', amount: 48000 },
+    { item: 'Minyak goreng 2 liter', qty: 2, unit: 'liter', amount: 36000 },
+    { item: 'Gas elpiji 3 kg', qty: 1, unit: 'tabung', amount: 22000 }] },
+  { store: 'Warung Sembako Bu Tini', lines: [
+    { item: 'Tusuk sate 2 pak', qty: 2, unit: 'pak', amount: 16000 },
+    { item: 'Gula pasir 1 kg', qty: 1, unit: 'kg', amount: 17000 },
+    { item: 'Teh celup 1 kotak', qty: 1, unit: 'kotak', amount: 7000 }] },
+];
+
+function receiptImage(r) {
+  const total = r.lines.reduce((sum, l) => sum + l.amount, 0);
+  const cash = Math.ceil(total / 50000) * 50000;
+  const h = 250 + r.lines.length * 34;
+  const fmt = n => n.toLocaleString('id-ID');
+  const rows = r.lines.map((l, i) => `<text x="20" y="${118 + i * 34}">${l.item}</text><text x="280" y="${118 + i * 34}" text-anchor="end">${fmt(l.amount)}</text>`).join('');
+  const y0 = 118 + r.lines.length * 34;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="${h}" viewBox="0 0 300 ${h}"><rect width="300" height="${h}" fill="#fffdf7"/>` +
+    `<g font-family="Courier New, monospace" font-size="14" fill="#1f2937">` +
+    `<text x="150" y="40" text-anchor="middle" font-weight="bold">${r.store}</text>` +
+    `<text x="150" y="62" text-anchor="middle" font-size="12">${fmtDate(todayKey())}</text>` +
+    `<line x1="20" y1="84" x2="280" y2="84" stroke="#9ca3af" stroke-dasharray="4 4"/>${rows}` +
+    `<line x1="20" y1="${y0 - 8}" x2="280" y2="${y0 - 8}" stroke="#9ca3af" stroke-dasharray="4 4"/>` +
+    `<text x="20" y="${y0 + 20}" font-weight="bold">TOTAL</text><text x="280" y="${y0 + 20}" text-anchor="end" font-weight="bold">${fmt(total)}</text>` +
+    `<text x="20" y="${y0 + 46}">TUNAI</text><text x="280" y="${y0 + 46}" text-anchor="end">${fmt(cash)}</text>` +
+    `<text x="20" y="${y0 + 70}">KEMBALI</text><text x="280" y="${y0 + 70}" text-anchor="end">${fmt(cash - total)}</text>` +
+    `<text x="150" y="${h - 18}" text-anchor="middle" font-size="11">Terima kasih</text></g></svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+/* =========================================================
+   Pembaca nota (OCR di browser dengan Tesseract.js)
+   ========================================================= */
+let ocrWorkerPromise = null, ocrOnProgress = null;
+function getOcrWorker() {
+  if (!window.Tesseract) return Promise.reject(new Error('Pustaka OCR tidak termuat'));
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = Tesseract.createWorker('ind', 1, { logger: m => ocrOnProgress && ocrOnProgress(m) })
+      .then(async w => { await w.setParameters({ tessedit_pageseg_mode: '4', preserve_interword_spaces: '1' }); return w; })
+      .catch(e => { ocrWorkerPromise = null; throw e; });
+  }
+  return ocrWorkerPromise;
+}
+
+// Perbesar, jadikan abu-abu, dan naikkan kontras supaya tulisan lebih mudah dibaca
+function preprocessImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let scale = Math.min(3, Math.max(0.3, 1600 / img.naturalWidth));
+      if (img.naturalHeight * scale > 5000) scale = 5000 / img.naturalHeight;
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      const d = ctx.getImageData(0, 0, c.width, c.height), px = d.data;
+      for (let i = 0; i < px.length; i += 4) {
+        let v = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+        v = Math.max(0, Math.min(255, (v - 128) * 1.5 + 128));
+        px[i] = px[i + 1] = px[i + 2] = v;
+      }
+      ctx.putImageData(d, 0, 0);
+      resolve(c);
+    };
+    img.onerror = () => reject(new Error('Foto tidak bisa dibuka'));
+    img.src = src;
+  });
+}
+
+async function readReceipt(src, onProgress) {
+  ocrOnProgress = onProgress;
+  try {
+    const worker = await getOcrWorker();
+    const canvas = await preprocessImage(src);
+    const { data } = await worker.recognize(canvas);
+    return data.text || '';
+  } finally { ocrOnProgress = null; }
+}
+
+const RECEIPT_SKIP = /(sub\s*total|total|jumlah|tunai|cash|kembali|change|bayar|diskon|disc|potongan|ppn|pajak|tax|debit|kredit|qris|kasir|npwp|telp|struk|terima\s*kasih|member|poin)/i;
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, ags: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
+
+// Harga di ujung baris, termasuk salah baca umum (O jadi 0, l/I jadi 1)
+function priceAtEnd(line) {
+  const m = line.match(/([0-9OoIl][0-9OoIl.,]{2,})(?:[.,]-)?\s*$/);
+  if (!m) return null;
+  let raw = m[1].replace(/[Oo]/g, '0').replace(/[Il]/g, '1');
+  if (/\d[.,]\d{3}[.,]00$/.test(raw)) raw = raw.slice(0, -3);   // 65.000,00 -> 65.000
+  const digits = raw.replace(/\D/g, '');
+  const n = Number(digits);
+  if (digits.length < 3 || n < 100 || n > 50000000) return null;
+  return { value: n, index: m.index };
+}
+
+function receiptDate(line) {
+  const t = todayKey();
+  const ok = (y, mo, d) => {
+    if (y < 100) y += 2000;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    const k = `${y}-${pad(mo)}-${pad(d)}`;
+    return k <= t && k >= addDays(t, -365) ? k : null;
+  };
+  const a = line.match(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})\b/);
+  if (a) return { key: ok(+a[3], +a[2], +a[1]) };
+  const b = line.match(/\b(\d{1,2})\s+([a-z]{3})[a-z]*\.?\s+(\d{2,4})\b/i);
+  if (b && MONTHS[b[2].toLowerCase()]) return { key: ok(+b[3], MONTHS[b[2].toLowerCase()], +b[1]) };
+  return null;
+}
+
+function parseReceiptText(text) {
+  const rows = text.split('\n').map(l => l.replace(/[|_~`"'*]/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const lines = [];
+  let store = null, date = null, total = null, pendingName = null;
+  const loose = [];   // angka tanpa label (kadang label TOTAL/TUNAI terbaca terpisah dari angkanya)
+  for (const line of rows) {
+    const lower = line.toLowerCase();
+    const dt = receiptDate(line);
+    if (dt) { if (!date && dt.key) date = dt.key; continue; }
+    if (/\b\d{1,2}[:.]\d{2}(:\d{2})?\b/.test(line) && !/[a-z]{3}/i.test(line)) continue;   // baris jam
+    const price = priceAtEnd(line);
+    if (RECEIPT_SKIP.test(lower)) {
+      const isLabel = /(total|jumlah|tunai|cash|kembali|change|bayar|diskon|disc|potongan)/.test(lower);
+      const value = price ? price.value : isLabel && loose.length ? loose.shift() : null;
+      if (value && /\b(total|jumlah)\b/.test(lower) && !/(sub|item|qty|disc)/.test(lower)) total = value;
+      if (value && /(diskon|disc|potongan)/.test(lower) && lines.length) {
+        const last = lines[lines.length - 1];   // diskon di struk berlaku untuk barang tepat di atasnya
+        if (value < last.amount) { last.amount -= value; last.disc = (last.disc || 0) + value; }
+      }
+      pendingName = null;
+      continue;
+    }
+    const letters = s => (s.match(/[a-z]/gi) || []).length;
+    if (!price) {
+      if (letters(line) >= 3) { if (!store && !lines.length) store = line; else pendingName = line; }
+      continue;
+    }
+    let rest = line.slice(0, price.index), count = null;
+    const qx = rest.match(/(\d+(?:[.,]\d+)?)\s*[xX×]\s*(?:@\s*)?(?:rp\.?\s*)?[\d.,]*/i);
+    if (qx) { count = toNum(qx[1]); rest = rest.replace(qx[0], ' '); }
+    rest = rest.replace(/@\s*(?:rp\.?\s*)?[\d.,]+/gi, ' ').replace(/^\s*\d{5,}\s*/, ' ').replace(/\brp\.?/gi, ' ');
+    let name = rest.replace(/[^A-Za-z0-9 &.,/%()-]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.,\-]+$/, '');
+    if (letters(name) < 3) {
+      if (!pendingName) { if (!qx && !letters(line)) loose.push(price.value); continue; }
+      name = pendingName;          // nama barang di baris atas, harga di baris bawah (struk minimarket)
+    }
+    pendingName = null;
+    const qm = name.toLowerCase().match(RE_QTY);
+    lines.push({ item: cap(name.toLowerCase()), amount: price.value, count,
+      size: qm ? toNum(qm[1]) : null, sizeUnit: qm ? UNIT_ALIAS[qm[2]] : null });
+  }
+  // Satu angka salah baca (mis. 7.000 terbaca 71.000)? Betulkan dari total nota kalau digitnya mirip.
+  if (total && lines.length) {
+    const sum = lines.reduce((a, l) => a + l.amount, 0);
+    const within = (a, b) => { let i = 0; for (const ch of b) if (ch === a[i]) i++; return i === a.length; };
+    if (sum !== total) {
+      for (const l of lines) {
+        const want = total - (sum - l.amount);
+        if (want > 0 && (within(String(want), String(l.amount)) || within(String(l.amount), String(want)))) {
+          l.read = l.amount; l.amount = want; l.fixed = true;
+          break;
+        }
+      }
+    }
+  }
+  return { store, date, total, lines };
+}
+
+function ReceiptCard({ m, stock, onToggle, onEditLine, onAddLine, onSave, onCancel, go }) {
+  const pending = m.status === 'pending', saved = m.status === 'saved', cancelled = m.status === 'cancelled';
+  const chosen = m.lines.filter(l => l.include);
+  const net = sumBy(chosen, 'masuk') - sumBy(chosen, 'keluar');
+  const readSum = m.lines.reduce((sum, l) => sum + l.amount, 0);
+  return (
+    <div className={`w-full max-w-[340px] rounded-2xl border bg-white shadow-sm overflow-hidden ${saved ? 'border-emerald-300' : 'border-slate-200'} ${cancelled ? 'opacity-60' : ''}`}>
+      <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-sm font-semibold bg-slate-100 text-slate-800">
+        <span className="flex items-center gap-1.5"><Icon name="camera" className="w-4 h-4" />Hasil scan nota</span>
+        {saved && <span className="flex items-center gap-1 text-emerald-800"><Icon name="checkCircle" className="w-4 h-4" />Tersimpan</span>}
+        {cancelled && <span className="text-slate-600">Dibatalkan</span>}
+      </div>
+      <div className="px-4 pt-3 pb-1">
+        <div className="font-bold">{m.store}</div>
+        <div className="text-sm text-slate-500">{relDayFull(m.lines[0].date)} · {m.lines.length} barang terbaca</div>
+      </div>
+      <ul className="divide-y divide-slate-100">
+        {m.lines.map(l => {
+          const st = l.stock && stock.find(x => x.id === l.stock.itemId);
+          return (
+            <li key={l.id} className={`flex items-center ${l.include ? '' : 'opacity-50'}`}>
+              {pending ? (
+                <label className="w-12 h-14 grid place-items-center shrink-0 cursor-pointer">
+                  <input type="checkbox" className="w-5 h-5 accent-blue-600" checked={l.include} onChange={() => onToggle(l.id)} aria-label={`Ikut disimpan: ${l.item}`} />
+                </label>
+              ) : <span className="w-4 shrink-0" />}
+              <button disabled={!pending} onClick={() => onEditLine(l)} className="flex-1 min-w-0 min-h-[56px] flex items-center gap-2 py-2 pr-3 text-left disabled:cursor-default">
+                <span className="flex-1 min-w-0">
+                  <span className={`block font-semibold truncate ${l.include ? '' : 'line-through'}`}>{l.item}</span>
+                  <span className="block text-xs text-slate-500 truncate">{l.category}{l.disc ? ` · diskon ${rupiah(l.disc)}` : ''}{st ? ` · stok +${fmtQty(l.stock.qty)} ${st.unit}` : l.stockMatch && pending ? ' · ketuk untuk isi stok' : ''}</span>
+                  {l.fixed && pending && <span className="block text-xs text-amber-800">Terbaca {rupiah(l.read)}, disesuaikan dengan total nota</span>}
+                </span>
+                <span className={`font-bold tabular-nums text-sm ${l.type === 'masuk' ? 'text-emerald-700' : 'text-rose-700'}`}>{signed(l.type, l.amount)}</span>
+                {pending && <Icon name="edit" className="w-4 h-4 text-slate-400 shrink-0" />}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {pending && (
+        <button onClick={onAddLine} className="w-full h-11 border-t border-slate-100 text-sm font-semibold text-blue-700 flex items-center justify-center gap-1.5">
+          <Icon name="plus" className="w-4 h-4" />Tambah barang yang terlewat
+        </button>
+      )}
+      <div className="px-4 py-3 border-t border-slate-200 flex justify-between items-baseline">
+        <span className="text-sm text-slate-600">Total {saved ? 'disimpan' : 'dipilih'}</span>
+        <span className={`text-xl font-extrabold tabular-nums ${net < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{signedNum(net)}</span>
+      </div>
+      {pending && (
+        <div className="px-3 pb-3">
+          {m.total ? (m.total === readSum ? (
+            <p className="text-sm text-emerald-800 mb-2 flex items-center gap-1.5"><Icon name="checkCircle" className="w-4 h-4 shrink-0" />Cocok dengan total di nota ({rupiah(m.total)}).</p>
+          ) : (
+            <p className="text-sm text-amber-900 bg-amber-50 rounded-lg p-2.5 mb-2 flex gap-1.5"><Icon name="alert" className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>Total di nota {rupiah(m.total)}, yang terbaca {rupiah(readSum)}. Mungkin ada barang yang terlewat atau salah baca.</span></p>
+          )) : null}
+          <p className="text-xs text-slate-500 mb-2">Periksa dulu. Ketuk barang untuk mengubah, hilangkan centang kalau tidak ikut disimpan.</p>
+          <div className="grid grid-cols-[auto_1fr] gap-2">
+            <button className={`${BTN_SECONDARY} px-4`} onClick={onCancel}>Batal</button>
+            <button className={BTN_PRIMARY} disabled={!chosen.length} onClick={onSave}><Icon name="check" className="w-5 h-5" />Simpan {chosen.length} catatan</button>
+          </div>
+        </div>
+      )}
+      {saved && <button className="w-full h-11 border-t border-slate-100 text-sm font-semibold text-blue-700" onClick={() => go('riwayat')}>Lihat di Riwayat</button>}
+    </div>
+  );
+}
+
+function ScanSheet({ onPick, onClose }) {
+  const [preview, setPreview] = useState(null);
+  const pick = e => { const f = e.target.files && e.target.files[0]; if (f) setPreview(URL.createObjectURL(f)); e.target.value = ''; };
+  if (preview) return (
+    <Sheet title="Periksa foto" onClose={onClose}>
+      <img src={preview} alt="Foto nota yang dipilih" className="w-full max-h-[52vh] object-contain rounded-xl bg-slate-100" />
+      <p className="mt-3 text-sm text-slate-600">Tulisan terlihat jelas dan tidak buram? Kalau iya, lanjut baca.</p>
+      <div className="mt-4 grid grid-cols-[auto_1fr] gap-2">
+        <button className={`${BTN_SECONDARY} px-4`} onClick={() => setPreview(null)}>Ganti foto</button>
+        <button className={BTN_PRIMARY} onClick={() => onPick(preview)}><Icon name="check" className="w-5 h-5" />Baca nota ini</button>
+      </div>
+    </Sheet>
+  );
+  return (
+    <Sheet title="Scan nota belanja" onClose={onClose}>
+      <div className="rounded-2xl bg-slate-50 p-4 flex gap-3">
+        <span className="w-12 h-12 shrink-0 rounded-xl bg-blue-100 text-blue-700 grid place-items-center"><Icon name="camera" /></span>
+        <p className="text-slate-700">Foto nota atau struk belanja. Jualans membaca nama barang dan harganya, lalu kamu tinggal periksa.</p>
+      </div>
+      <ul className="mt-4 space-y-1.5 text-sm text-slate-600">
+        {['Taruh nota di tempat terang, ratakan kalau terlipat.', 'Pegang HP tegak lurus di atas nota.', 'Pastikan semua tulisan masuk dan tidak buram.'].map(t => (
+          <li key={t} className="flex gap-2"><Icon name="check" className="w-4 h-4 mt-0.5 text-blue-700 shrink-0" />{t}</li>
+        ))}
+      </ul>
+      <div className="mt-5 space-y-2">
+        <label className={`${BTN_PRIMARY} w-full cursor-pointer`}>
+          <Icon name="camera" className="w-5 h-5" />Ambil foto
+          <input type="file" accept="image/*" capture="environment" className="sr-only" onChange={pick} />
+        </label>
+        <label className={`${BTN_SECONDARY} w-full cursor-pointer`}>
+          Pilih dari galeri
+          <input type="file" accept="image/*" className="sr-only" onChange={pick} />
+        </label>
+        <button className="w-full h-11 text-sm font-semibold text-blue-700" onClick={() => onPick(null)}>Belum ada nota? Coba pakai contoh nota</button>
+      </div>
+      <p className="mt-2 text-xs text-slate-500 text-center">Pertama kali butuh internet untuk menyiapkan pembaca nota.</p>
+    </Sheet>
+  );
+}
+
+function VoicePanel({ voice, onDone, onCancel, onRetry, onSim }) {
+  if (voice.status === 'error') return (
+    <div className="p-4">
+      <div className="flex items-start gap-3">
+        <span className="w-11 h-11 shrink-0 rounded-full bg-amber-100 text-amber-800 grid place-items-center"><Icon name="mic" /></span>
+        <p className="text-slate-700 pt-1">{voice.error}</p>
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <button className={`${BTN_SECONDARY} text-sm`} onClick={onCancel}>Tutup</button>
+        <button className={`${BTN_SECONDARY} text-sm`} onClick={onSim}>Simulasi</button>
+        <button className={`${BTN_PRIMARY} text-sm`} onClick={onRetry}>Coba lagi</button>
+      </div>
+    </div>
+  );
+  return (
+    <div className="p-4">
+      <div className="flex items-center gap-4">
+        <span className="relative w-14 h-14 shrink-0">
+          <span className="absolute inset-0 rounded-full bg-blue-400/40 animate-ping" />
+          <span className="relative w-14 h-14 rounded-full bg-blue-600 text-white grid place-items-center"><Icon name="mic" className="w-7 h-7" /></span>
+        </span>
+        <div className="min-w-0" aria-live="polite">
+          <div className="text-sm font-semibold text-blue-700">{voice.mode === 'sim' ? 'Simulasi suara…' : 'Mendengarkan…'}</div>
+          <div className={`mt-0.5 text-lg leading-snug ${voice.text ? 'text-slate-900 font-semibold' : 'text-slate-400'}`}>
+            {voice.text || 'Ucapkan, misalnya: “jual sepuluh cilok lima puluh ribu”'}
+          </div>
+        </div>
+      </div>
+      {voice.note && <p className="mt-2 text-xs text-slate-500">{voice.note}</p>}
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button className={BTN_SECONDARY} onClick={onCancel}>Batal</button>
+        <button className={BTN_PRIMARY} onClick={onDone}><Icon name="check" className="w-5 h-5" />Selesai</button>
+      </div>
+    </div>
+  );
+}
+
+const SIM_PHRASES = ['jual sepuluh cilok lima puluh ribu', 'beli tepung tapioka lima kilo enam puluh lima ribu',
+  'kemarin jual es teh dua puluh gelas enam puluh ribu', 'pakai minyak satu liter', 'bayar gas dua puluh dua ribu'];
+
+function StockCard({ m, item, onSave, onEdit, onCancel, go }) {
+  if (!item) return null;
+  const pending = m.status === 'pending', saved = m.status === 'saved', cancelled = m.status === 'cancelled';
+  const after = saved ? m.after : Math.max(0, item.qty + m.change);
+  const Row = ({ label, children }) => (
+    <div className="flex justify-between items-center gap-3 py-2"><dt className="text-slate-500">{label}</dt><dd className="font-semibold text-right">{children}</dd></div>
+  );
+  return (
+    <div className={`w-full max-w-[310px] rounded-2xl border bg-white shadow-sm overflow-hidden ${saved ? 'border-blue-300' : 'border-slate-200'} ${cancelled ? 'opacity-60' : ''}`}>
+      <div className="px-4 py-2.5 flex items-center justify-between text-sm font-semibold bg-blue-50 text-blue-800">
+        <span className="flex items-center gap-1.5"><Icon name="box" className="w-4 h-4" />Stok dipakai</span>
+        {saved && <span className="flex items-center gap-1"><Icon name="checkCircle" className="w-4 h-4" />Tersimpan</span>}
+        {cancelled && <span className="text-slate-600">Dibatalkan</span>}
+      </div>
+      <div className="px-4 pt-3">
+        <div className="text-xs text-slate-500">Bahan</div>
+        <div className="text-lg font-bold">{item.name}</div>
+        <dl className="mt-1 text-sm divide-y divide-slate-100">
+          <Row label="Dipakai">−{fmtQty(-m.change)} {item.unit}</Row>
+          <Row label="Sisa jadi">{fmtQty(after)} {item.unit}</Row>
+          <Row label="Status"><StockBadge status={stockStatus({ ...item, qty: after })} /></Row>
+        </dl>
+        <p className="text-xs text-slate-500 pb-3">Hanya mengurangi stok, tidak dihitung sebagai uang keluar.</p>
+      </div>
+      {pending && (
+        <div className="p-3 pt-0">
+          <div className="grid grid-cols-2 gap-2">
+            <button className={BTN_SECONDARY} onClick={onEdit}><Icon name="edit" className="w-5 h-5" />Ubah</button>
+            <button className={BTN_PRIMARY} onClick={onSave}><Icon name="check" className="w-5 h-5" />Simpan</button>
+          </div>
+          <button className="w-full h-11 mt-1 text-sm font-semibold text-slate-500" onClick={onCancel}>Batal, bukan ini</button>
+        </div>
+      )}
+      {saved && <button className="w-full h-11 border-t border-slate-100 text-sm font-semibold text-blue-700" onClick={() => go('stok')}>Lihat Stok</button>}
+    </div>
+  );
+}
+
+function Catat({ messages, setMessages, txs, cats, addTx, setTxModal, go, stock, applyStock, setStockModal }) {
+  const [text, setText] = useState('');
+  const endRef = useRef(null);
+  const inputRef = useRef(null);
+  const [voice, setVoice] = useState(null);          // panel suara: { mode: 'live'|'sim', status, text, error, note }
+  const [scanOpen, setScanOpen] = useState(false);
+  const recRef = useRef(null);
+  const voiceRef = useRef({ text: '', timers: [] });
+  const simIdx = useRef(0), scanIdx = useRef(0);
+
+  useEffect(() => { endRef.current && endRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, messages[messages.length - 1]?.id, !!voice]);
+  useEffect(() => () => stopVoice(true), []);
+
+  const patch = (id, p) => setMessages(ms => ms.map(m => m.id === id ? { ...m, ...p } : m));
+  const botReply = (msg, delay = 650, label) => {
+    const typingId = uid();
+    setMessages(ms => [...ms, { id: typingId, from: 'bot', kind: 'typing', label }]);
+    setTimeout(() => setMessages(ms => [...ms.filter(m => m.id !== typingId), { id: uid(), from: 'bot', ...msg }]), delay);
+  };
+
+  const send = raw => {
+    const value = (raw ?? text).trim();
+    if (!value) return;
+    setText('');
+    setMessages(ms => [...ms, { id: uid(), from: 'user', kind: 'text', text: value }]);
+
+    if (/(\bbon\b|utang|hutang|ngutang|kasbon)/i.test(value)) {
+      return botReply({ kind: 'text', text: 'Sepertinya ini soal utang pelanggan. Catat di menu Bon supaya tidak tercampur dengan uang masuk.', actions: [{ key: 'bon', label: 'Buka Bon' }] });
+    }
+
+    const lower = normalizeNumberWords(value.toLowerCase());
+    // Pemakaian bahan: hanya mengurangi stok, bukan transaksi uang
+    if (/\b(pakai|terpakai|dipakai|kepakai)\b/.test(lower) && !detectType(lower)) {
+      const s = matchStock(lower, stock);
+      if (!s) return botReply({ kind: 'text', text: 'Bahan itu belum ada di daftar stok. Tambahkan dulu di halaman Stok, nanti bisa dicatat lewat chat.', actions: [{ key: 'stok', label: 'Buka Stok' }] });
+      const qm = lower.match(RE_QTY), num = lower.match(/\d+(?:[.,]\d+)?/);
+      const qty = qm ? stockQtyFor(s, toNum(qm[1]), UNIT_ALIAS[qm[2]], null) : num ? toNum(num[0]) : 0;
+      if (!qty) return botReply({ kind: 'text', text: `Berapa ${s.unit} ${s.name.toLowerCase()} yang dipakai? Contoh: “pakai ${(s.keywords && s.keywords[0]) || s.name.toLowerCase()} 2 ${s.unit}”.`,
+        actions: [{ key: 'stokAdjust', label: 'Isi jumlahnya', itemId: s.id, mode: 'pakai' }] });
+      return botReply({ kind: 'stock', status: 'pending', itemId: s.id, change: -qty });
+    }
+    if (/^(cek\s+)?(stok|stock)\b/.test(lower)) {
+      const low = stock.filter(s => stockStatus(s) !== 'aman');
+      return botReply({ kind: 'text', actions: [{ key: 'stok', label: 'Buka Stok' }], text: low.length
+        ? `Perlu dibeli: ${low.map(s => `${s.name} (sisa ${fmtQty(s.qty)} ${s.unit})`).join(', ')}.`
+        : stock.length ? 'Semua stok bahan masih aman.' : 'Daftar stok masih kosong.' });
+    }
+
+    const p = parseMessage(value, cats);
+    if (p.type && p.amount) {
+      const draft = { type: p.type, item: p.item, amount: p.amount, category: p.category, date: p.date };
+      if (p.type === 'keluar') {
+        const s = matchStock(lower, stock);
+        if (s) {
+          draft.stockMatch = s.id;
+          const q = stockQtyFor(s, p.qty, p.unit, null);
+          if (q) draft.stock = { itemId: s.id, qty: q };
+        }
+      }
+      return botReply({ kind: 'card', status: 'pending', draft });
+    }
+    if (!p.type && p.amount) {
+      return botReply({ kind: 'ask', text: `Saya baca nominalnya ${rupiah(p.amount)}. Ini uang masuk atau uang keluar?`, draft: p, answered: null });
+    }
+    if (p.type && !p.amount) {
+      const contoh = p.type === 'masuk' ? 'jual 10 cilok 50rb' : 'beli tepung 65rb';
+      return botReply({ kind: 'text', text: `Nominalnya belum ketemu. Coba ulangi dengan harga, misalnya “${contoh}”, atau isi lewat form.`,
+        actions: [{ key: 'form', label: 'Isi form manual', draft: { type: p.type, item: p.item, category: p.category, date: p.date } }] });
+    }
+    botReply({ kind: 'text', text: 'Maaf, saya belum bisa membaca pesan ini. Coba tulis ulang dengan kata “jual”, “beli”, atau “bayar” dan nominalnya. Contoh: “jual 10 cilok 50rb”.',
+      actions: [{ key: 'form', label: 'Isi form manual', draft: {} }] });
+  };
+
+  const saveDraft = (msgId, draft) => {
+    const nt = addTx(draft);
+    patch(msgId, { status: 'saved', draft });
+    let follow;
+    if (nt.date === todayKey()) {
+      const today = [...txs, nt].filter(x => x.date === todayKey());
+      const u = sumBy(today, 'masuk') - sumBy(today, 'keluar');
+      follow = `Sip, sudah dicatat. ${u < 0 ? 'Rugi' : 'Untung'} hari ini sekarang ${signedNum(u)}.`;
+    } else {
+      follow = `Sip, sudah dicatat untuk ${relLower(nt.date)}.`;
+    }
+    const s = draft.stock && stock.find(x => x.id === draft.stock.itemId);
+    if (s) follow += ` Stok ${s.name.toLowerCase()} jadi ${fmtQty(s.qty + draft.stock.qty)} ${s.unit}.`;
+    botReply({ kind: 'text', text: follow, actions: [{ key: 'beranda', label: 'Lihat Beranda' }] }, 450);
+    // Bahan dikenali tapi jumlahnya tidak disebut: tawarkan tambah stok
+    const sm = !draft.stock && draft.type === 'keluar' && draft.stockMatch && stock.find(x => x.id === draft.stockMatch);
+    if (sm) setTimeout(() => botReply({ kind: 'text', text: `Mau tambah stok ${sm.name.toLowerCase()} juga? Jumlahnya belum disebut.`,
+      actions: [{ key: 'stokAdjust', label: 'Tambah stok', itemId: sm.id, mode: 'tambah' }] }, 450), 700);
+  };
+
+  const editDraft = m => setTxModal({ mode: 'draft', initial: m.draft, onSave: f => saveDraft(m.id, f) });
+
+  const answerAsk = (m, type) => {
+    patch(m.id, { answered: type });
+    setMessages(ms => [...ms, { id: uid(), from: 'user', kind: 'text', text: type === 'masuk' ? 'Uang masuk' : 'Uang keluar' }]);
+    const raw = m.draft;
+    botReply({ kind: 'card', status: 'pending', draft: {
+      type, amount: raw.amount, date: raw.date,
+      item: raw.item || (type === 'masuk' ? 'Penjualan' : 'Belanja'), category: guessCategory(type, raw.item.toLowerCase(), cats),
+    } }, 450);
+  };
+
+  const runAction = a => {
+    if (a.key === 'form') setTxModal({ mode: 'new', initial: a.draft || {}, onSave: f => saveDraftNew(f) });
+    else if (a.key === 'scan') setScanOpen(true);
+    else if (a.key === 'stokAdjust') setStockModal({ type: 'adjust', itemId: a.itemId, mode: a.mode });
+    else go(a.key);
+  };
+  /* ---- Suara ---- */
+  const stopVoice = cancel => {
+    const v = voiceRef.current;
+    v.timers.forEach(clearTimeout); v.timers = [];
+    if (cancel) v.cancelled = true;
+    if (recRef.current) { try { cancel ? recRef.current.abort() : recRef.current.stop(); } catch (e) { /* sudah berhenti */ } }
+  };
+  const startSimVoice = note => {
+    stopVoice(true);
+    const phrase = SIM_PHRASES[simIdx.current++ % SIM_PHRASES.length];
+    const words = phrase.split(' ');
+    const v = voiceRef.current = { mode: 'sim', text: '', timers: [] };
+    setVoice({ mode: 'sim', status: 'listening', text: '', note });
+    words.forEach((w, i) => v.timers.push(setTimeout(() => {
+      v.text = words.slice(0, i + 1).join(' ');
+      setVoice(s => s && { ...s, text: v.text });
+    }, 700 + i * 330)));
+    v.timers.push(setTimeout(() => finishVoice(), 700 + words.length * 330 + 800));
+  };
+  const startVoice = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return startSimVoice('Browser ini belum mendukung input suara, jadi ditampilkan simulasi.');
+    stopVoice(true);
+    const v = voiceRef.current = { mode: 'live', text: '', timers: [] };
+    const rec = new SR();
+    rec.lang = 'id-ID'; rec.interimResults = true; rec.continuous = false;
+    rec.onresult = e => {
+      v.text = Array.from(e.results).map(r => r[0].transcript).join(' ');
+      setVoice(s => s && { ...s, text: v.text });
+    };
+    rec.onerror = e => {
+      v.failed = true;
+      const error = e.error === 'not-allowed' || e.error === 'service-not-allowed'
+        ? 'Mikrofon belum diizinkan. Izinkan mikrofon di browser, atau coba simulasi.'
+        : e.error === 'no-speech' ? 'Suaranya tidak terdengar. Coba lagi lebih dekat ke HP.'
+        : 'Input suara sedang tidak bisa dipakai. Coba lagi, atau pakai simulasi.';
+      if (!v.cancelled) setVoice({ mode: 'live', status: 'error', error });
+    };
+    rec.onend = () => {
+      recRef.current = null;
+      if (v.failed || v.cancelled) return;
+      if (!v.text.trim()) return setVoice({ mode: 'live', status: 'error', error: 'Suaranya tidak terdengar. Coba lagi lebih dekat ke HP.' });
+      setVoice(null);
+      send(v.text);
+    };
+    recRef.current = rec;
+    setVoice({ mode: 'live', status: 'listening', text: '' });
+    try { rec.start(); } catch (e) { startSimVoice('Input suara tidak bisa dimulai, jadi ditampilkan simulasi.'); }
+  };
+  const finishVoice = () => {
+    const v = voiceRef.current;
+    if (v.mode === 'live' && recRef.current) { recRef.current.stop(); return; }  // onend yang mengirim
+    stopVoice(true);
+    setVoice(null);
+    if (v.text.trim()) send(v.text);
+  };
+  const cancelVoice = () => { stopVoice(true); setVoice(null); };
+
+  /* ---- Scan nota ---- */
+  const makeLine = (l, date) => {
+    const line = { id: uid(), type: 'keluar', item: l.item, amount: l.amount, date, include: true, fixed: l.fixed, read: l.read, disc: l.disc,
+      category: guessCategory('keluar', l.item.toLowerCase(), cats) };
+    const st = matchStock(l.item, stock);
+    const q = st && stockQtyFor(st, l.size, l.sizeUnit, l.count);
+    if (st) { line.stockMatch = st.id; if (q) line.stock = { itemId: st.id, qty: q }; }
+    return line;
+  };
+  const handleScan = async src => {
+    setScanOpen(false);
+    if (!src) src = receiptImage(SAMPLE_RECEIPTS[scanIdx.current++ % SAMPLE_RECEIPTS.length]);
+    const scanId = uid();
+    setMessages(ms => [...ms, { id: uid(), from: 'user', kind: 'image', src },
+      { id: scanId, from: 'bot', kind: 'scanning', label: 'Menyiapkan pembaca nota…', progress: 0 }]);
+    const onProgress = m => patch(scanId, {
+      label: /recogniz/.test(m.status) ? 'Membaca tulisan di nota…' : 'Menyiapkan pembaca nota…',
+      progress: Math.round((m.progress || 0) * 100),
+    });
+    let parsed = null;
+    try { parsed = parseReceiptText(await readReceipt(src, onProgress)); } catch (e) { parsed = null; }
+    setMessages(ms => ms.filter(x => x.id !== scanId));
+    const retry = [{ key: 'scan', label: 'Foto ulang' }, { key: 'form', label: 'Isi form manual', draft: { type: 'keluar' } }];
+    if (!parsed) return botReply({ kind: 'text', actions: retry,
+      text: 'Pembaca nota belum bisa dipakai. Pastikan HP tersambung internet (dibutuhkan saat pertama kali), lalu coba lagi.' }, 300);
+    if (!parsed.lines.length) return botReply({ kind: 'text', actions: retry,
+      text: 'Maaf, barang dan harganya belum terbaca jelas. Coba foto ulang di tempat terang, nota diratakan, dan HP tegak lurus di atas nota.' }, 300);
+    const date = parsed.date || todayKey();
+    botReply({ kind: 'receipt', status: 'pending', store: parsed.store || 'Nota belanja', total: parsed.total,
+      lines: parsed.lines.map(l => makeLine(l, date)) }, 300);
+  };
+  const patchLine = (msgId, lineId, p) => setMessages(ms => ms.map(x => x.id !== msgId ? x
+    : { ...x, lines: x.lines.map(l => l.id === lineId ? { ...l, ...(typeof p === 'function' ? p(l) : p) } : l) }));
+  const editLine = (m, l) => setTxModal({
+    mode: 'draft', initial: { type: l.type, item: l.item, amount: l.amount, category: l.category, date: l.date, stock: l.stock, stockMatch: l.stockMatch },
+    onSave: f => patchLine(m.id, l.id, { ...f, include: true, fixed: false }),
+  });
+  const addLine = m => setTxModal({
+    mode: 'draft', initial: { type: 'keluar', date: m.lines[0] ? m.lines[0].date : todayKey() },
+    onSave: f => setMessages(ms => ms.map(x => x.id !== m.id ? x : { ...x, lines: [...x.lines, { ...f, id: uid(), include: true }] })),
+  });
+  const saveReceipt = m => {
+    const chosen = m.lines.filter(l => l.include);
+    chosen.forEach(l => addTx({ type: l.type, item: l.item, amount: l.amount, category: l.category, date: l.date, stock: l.stock }));
+    patch(m.id, { status: 'saved' });
+    const net = sumBy(chosen, 'masuk') - sumBy(chosen, 'keluar');
+    const stocked = chosen.filter(l => l.stock).map(l => (stock.find(x => x.id === l.stock.itemId) || {}).name).filter(Boolean);
+    botReply({ kind: 'text', actions: [{ key: 'beranda', label: 'Lihat Beranda' }],
+      text: `Sip, ${chosen.length} catatan dari nota sudah disimpan (${signedNum(net)}).` +
+        (stocked.length ? ` Stok ${stocked.map(n => n.toLowerCase()).join(', ')} ikut bertambah.` : '') }, 450);
+  };
+
+  const markStockSaved = (m, change, r) => {
+    patch(m.id, { status: 'saved', change, after: r.qty });
+    const st = stockStatus(r);
+    botReply({ kind: 'text', text: `Sip, stok ${r.name.toLowerCase()} sisa ${fmtQty(r.qty)} ${r.unit}.` +
+      (st === 'habis' ? ' Stoknya sudah habis, waktunya belanja.' : st === 'hampir' ? ' Sudah hampir habis, jangan lupa belanja.' : '') }, 450);
+  };
+  const saveStockCard = m => {
+    const r = applyStock(m.itemId, m.change, 'Dipakai (dari chat)');
+    if (r) markStockSaved(m, m.change, r);
+  };
+  const saveDraftNew = f => {
+    const nt = addTx(f);
+    setMessages(ms => [...ms, { id: uid(), from: 'bot', kind: 'card', status: 'saved', draft: { ...f, id: nt.id } }]);
+  };
+
+  return (
+    <div className="flex flex-col min-h-[calc(100vh-4rem)]">
+      <PageHeader title="Catat" subtitle="Ketik, ucapkan, atau foto nota belanja"
+        right={
+          <button onClick={() => setTxModal({ mode: 'new', initial: {}, onSave: f => saveDraftNew(f) })}
+                  className="h-11 px-3 mr-1 rounded-xl text-sm font-semibold text-blue-700 hover:bg-blue-50 flex items-center gap-1.5">
+            <Icon name="form" className="w-5 h-5" />Form
+          </button>
+        } />
+
+      <div className={`flex-1 px-3 pt-4 ${voice ? 'pb-60' : 'pb-40'} space-y-3 bg-slate-50`} aria-live="polite">
+        {messages.map(m => {
+          if (m.kind === 'image') return (
+            <div key={m.id} className="msg-in flex justify-end">
+              <div className="rounded-2xl rounded-br-md bg-blue-600 p-1.5">
+                <img src={m.src} alt="Foto nota" className="block w-40 max-h-56 object-cover object-top rounded-xl bg-white" />
+              </div>
+            </div>
+          );
+          if (m.from === 'user') return (
+            <div key={m.id} className="msg-in flex justify-end">
+              <div className="max-w-[80%] bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2.5 break-words">{m.text}</div>
+            </div>
+          );
+          if (m.kind === 'typing') return (
+            <div key={m.id} className="flex"><div className="bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-1" aria-label={m.label || 'Sedang membaca'}>
+              {m.label && <span className="text-sm text-slate-600 mr-2">{m.label}</span>}
+              <span className="dot w-2 h-2 rounded-full bg-slate-400" /><span className="dot w-2 h-2 rounded-full bg-slate-400" /><span className="dot w-2 h-2 rounded-full bg-slate-400" />
+            </div></div>
+          );
+          if (m.kind === 'scanning') return (
+            <div key={m.id} className="flex">
+              <div className="w-[260px] bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-3" role="status">
+                <div className="flex items-center justify-between gap-2 text-sm">
+                  <span className="font-semibold text-slate-700">{m.label}</span><span className="tabular-nums text-slate-500">{m.progress}%</span>
+                </div>
+                <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
+                  <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${m.progress}%` }} />
+                </div>
+              </div>
+            </div>
+          );
+          if (m.kind === 'receipt') return (
+            <div key={m.id} className="msg-in flex">
+              <ReceiptCard m={m} stock={stock} go={go} onSave={() => saveReceipt(m)} onCancel={() => patch(m.id, { status: 'cancelled' })}
+                onToggle={id => patchLine(m.id, id, l => ({ include: !l.include }))} onEditLine={l => editLine(m, l)} onAddLine={() => addLine(m)} />
+            </div>
+          );
+          if (m.kind === 'stock') return (
+            <div key={m.id} className="msg-in flex">
+              <StockCard m={m} item={stock.find(s => s.id === m.itemId)} go={go} onSave={() => saveStockCard(m)}
+                onEdit={() => setStockModal({ type: 'adjust', itemId: m.itemId, mode: 'pakai', qty: -m.change, lockMode: true, onDone: (change, r) => markStockSaved(m, change, r) })}
+                onCancel={() => patch(m.id, { status: 'cancelled' })} />
+            </div>
+          );
+          if (m.kind === 'card') return (
+            <div key={m.id} className="msg-in flex">
+              <ConfirmCard m={m} go={go} stock={stock} onSave={() => saveDraft(m.id, m.draft)} onEdit={() => editDraft(m)} onCancel={() => patch(m.id, { status: 'cancelled' })} />
+            </div>
+          );
+          return (
+            <div key={m.id} className="msg-in flex flex-col items-start gap-2">
+              <div className="max-w-[85%] bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-2.5 text-slate-800">{m.text}</div>
+              {m.kind === 'ask' && (
+                m.answered ? null : (
+                  <div className="flex gap-2">
+                    <button onClick={() => answerAsk(m, 'masuk')} className={`${BTN} px-4 bg-emerald-50 border border-emerald-300 text-emerald-800`}><b className="text-lg leading-none">+</b>Uang masuk</button>
+                    <button onClick={() => answerAsk(m, 'keluar')} className={`${BTN} px-4 bg-rose-50 border border-rose-300 text-rose-800`}><b className="text-lg leading-none">−</b>Uang keluar</button>
+                  </div>
+                )
+              )}
+              {m.actions && (
+                <div className="flex flex-wrap gap-2">
+                  {m.actions.map(a => (
+                    <button key={a.key} onClick={() => runAction(a)} className={`${BTN} h-11 px-4 bg-white border border-blue-200 text-blue-700 text-sm`}>
+                      {a.key === 'form' && <Icon name="form" className="w-4 h-4" />}{a.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <div ref={endRef} />
+      </div>
+
+      {/* Bilah ketik, menempel di atas menu bawah */}
+      <div className="fixed bottom-16 inset-x-0 z-20">
+        <div className="mx-auto max-w-[420px] bg-white border-t border-slate-200">
+          {voice ? (
+            <VoicePanel voice={voice} onDone={finishVoice} onCancel={cancelVoice} onRetry={startVoice} onSim={() => startSimVoice()} />
+          ) : (<>
+          <div className="flex gap-2 overflow-x-auto no-scrollbar px-3 pt-2">
+            {EXAMPLES.map(e => (
+              <button key={e} onClick={() => { setText(e); inputRef.current && inputRef.current.focus(); }}
+                      className="h-9 px-3 rounded-full bg-slate-100 text-sm text-slate-700 whitespace-nowrap hover:bg-slate-200">{e}</button>
+            ))}
+          </div>
+          <form onSubmit={e => { e.preventDefault(); send(); }} className="flex items-center gap-2 p-3">
+            <button type="button" onClick={() => setScanOpen(true)} aria-label="Scan nota pakai kamera"
+                    className="shrink-0 w-12 h-12 rounded-full bg-slate-100 text-slate-700 grid place-items-center hover:bg-slate-200">
+              <Icon name="camera" />
+            </button>
+            <input ref={inputRef} value={text} onChange={e => setText(e.target.value)} aria-label="Ketik transaksi"
+                   className="h-12 flex-1 min-w-0 rounded-full border border-slate-300 bg-slate-50 px-4 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                   placeholder="Ketik: jual 3 cilok 15rb" enterKeyHint="send" autoComplete="off" />
+            {text.trim() ? (
+              <button type="submit" aria-label="Kirim" className="shrink-0 w-12 h-12 rounded-full bg-blue-600 text-white grid place-items-center">
+                <Icon name="send" />
+              </button>
+            ) : (
+              <button type="button" onClick={startVoice} aria-label="Catat pakai suara" className="shrink-0 w-12 h-12 rounded-full bg-blue-600 text-white grid place-items-center">
+                <Icon name="mic" />
+              </button>
+            )}
+          </form>
+          </>)}
+        </div>
+      </div>
+      {scanOpen && <ScanSheet onPick={handleScan} onClose={() => setScanOpen(false)} />}
+    </div>
+  );
+}
+
+/* =========================================================
+   RIWAYAT
+   ========================================================= */
+const DATE_FILTERS = [['semua', 'Semua'], ['hari', 'Hari ini'], ['7', '7 hari'], ['bulan', 'Bulan ini'], ['pilih', 'Pilih tanggal']];
+
+function Riwayat({ txs, cats, openEditTx, openNewTx, go }) {
+  const [q, setQ] = useState('');
+  const [df, setDf] = useState('semua');
+  const [day, setDay] = useState(todayKey());
+  const [cat, setCat] = useState('');
+  const t = todayKey();
+  const allCats = [...new Set([...cats.masuk, ...cats.keluar, ...txs.map(x => x.category)])];
+
+  const filtered = sortTx(txs).filter(x => {
+    if (q && !(`${x.item} ${x.category}`.toLowerCase().includes(q.toLowerCase()))) return false;
+    if (cat && x.category !== cat) return false;
+    if (df === 'hari' && x.date !== t) return false;
+    if (df === '7' && x.date < addDays(t, -6)) return false;
+    if (df === 'bulan' && x.date.slice(0, 7) !== t.slice(0, 7)) return false;
+    if (df === 'pilih' && x.date !== day) return false;
+    return true;
+  });
+  const groups = filtered.reduce((acc, x) => { (acc[x.date] = acc[x.date] || []).push(x); return acc; }, {});
+  const isFiltered = q || cat || df !== 'semua';
+  const reset = () => { setQ(''); setCat(''); setDf('semua'); };
+
+  return (
+    <div>
+      <PageHeader title="Riwayat" subtitle={`${txs.length} transaksi tercatat`}
+        right={
+          <button onClick={openNewTx} aria-label="Tambah transaksi manual" className="w-11 h-11 mr-1 rounded-full bg-blue-50 text-blue-700 grid place-items-center hover:bg-blue-100">
+            <Icon name="plus" />
+          </button>
+        } />
+
+      {txs.length === 0 ? (
+        <EmptyState icon="list" title="Riwayat masih kosong" text="Semua transaksi yang kamu catat akan muncul di sini."
+          action={<button className={`${BTN_PRIMARY} w-full`} onClick={() => go('catat')}><Icon name="chat" className="w-5 h-5" />Mulai catat</button>} />
+      ) : (
+        <>
+          <div className="px-4 pt-3 space-y-2.5 bg-white">
+            <div className="relative">
+              <Icon name="search" className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input className={`${INPUT} pl-11`} value={q} onChange={e => setQ(e.target.value)} placeholder="Cari barang, misalnya: tepung" aria-label="Cari transaksi" />
+            </div>
+            <div className="flex gap-2 overflow-x-auto no-scrollbar -mx-4 px-4" role="group" aria-label="Filter tanggal">
+              {DATE_FILTERS.map(([k, l]) => (
+                <Chip key={k} active={df === k} onClick={() => setDf(k)}>
+                  {k === 'pilih' && <Icon name="calendar" className="w-4 h-4 inline -mt-0.5 mr-1" />}{l}
+                </Chip>
+              ))}
+            </div>
+            {df === 'pilih' && <input type="date" className={INPUT} value={day} max={t} onChange={e => setDay(e.target.value)} aria-label="Pilih tanggal" />}
+            <select className={`${INPUT} appearance-none bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%2364748b%22 stroke-width=%222%22><path d=%22m6 9 6 6 6-6%22/></svg>')] bg-no-repeat bg-[length:20px] bg-[right_14px_center]`}
+                    value={cat} onChange={e => setCat(e.target.value)} aria-label="Filter kategori">
+              <option value="">Semua kategori</option>
+              {allCats.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+
+          <div className="px-4 py-3 flex items-center justify-between text-sm border-b border-slate-200">
+            <span className="text-slate-600">{filtered.length} transaksi</span>
+            <span className="flex gap-3 font-semibold tabular-nums">
+              <span className="text-emerald-700">+{rupiah(sumBy(filtered, 'masuk'))}</span>
+              <span className="text-rose-700">−{rupiah(sumBy(filtered, 'keluar'))}</span>
+            </span>
+          </div>
+
+          {filtered.length === 0 ? (
+            <EmptyState icon="search" title="Tidak ada yang cocok" text="Coba kata lain, atau ubah filter tanggal dan kategori."
+              action={isFiltered && <button className={`${BTN_SECONDARY} w-full`} onClick={reset}>Hapus semua filter</button>} />
+          ) : (
+            Object.entries(groups).map(([date, list]) => {
+              const net = sumBy(list, 'masuk') - sumBy(list, 'keluar');
+              return (
+                <section key={date}>
+                  <div className="sticky top-16 z-10 bg-slate-100 px-4 py-2 flex justify-between text-sm">
+                    <span className="font-semibold text-slate-700">{relDay(date)}{relDay(date).includes(',') ? '' : `, ${fmtDate(date)}`}</span>
+                    <span className={`font-semibold tabular-nums ${net < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{signedNum(net)}</span>
+                  </div>
+                  <div className="divide-y divide-slate-100">
+                    {list.map(tx => <TxRow key={tx.id} tx={tx} onClick={() => openEditTx(tx)} />)}
+                  </div>
+                </section>
+              );
+            })
+          )}
+          {filtered.length > 0 && <p className="text-center text-xs text-slate-400 py-4">Ketuk transaksi untuk mengubah atau menghapus</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================
+   BON
+   ========================================================= */
+function Bon({ debts, openBon, openAddBon }) {
+  const open = debts.filter(d => debtTotal(d) > 0).sort((a, b) => debtTotal(b) - debtTotal(a));
+  const lunas = debts.filter(d => debtTotal(d) === 0);
+  const total = open.reduce((s, d) => s + debtTotal(d), 0);
+
+  const Item = ({ d }) => {
+    const unpaid = d.items.filter(i => !i.paid);
+    const lastDate = d.items.map(i => i.date).sort().pop();
+    const sum = debtTotal(d);
+    return (
+      <button onClick={() => openBon(d.id)} className="w-full flex items-center gap-3 px-4 py-3 min-h-[68px] text-left hover:bg-slate-50 active:bg-slate-100">
+        <span className={`shrink-0 w-11 h-11 rounded-full grid place-items-center font-bold ${sum ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-500'}`}>
+          {d.name.replace(/^(bu|pak|mas|mbak|bang|kak)\s+/i, '').charAt(0).toUpperCase()}
+        </span>
+        <span className="flex-1 min-w-0">
+          <span className="block font-semibold truncate">{d.name}</span>
+          <span className="block text-sm text-slate-500 truncate">
+            {sum ? `${unpaid.length} catatan · terakhir ${relLower(lastDate)}` : 'Sudah lunas'}
+          </span>
+        </span>
+        <span className={`shrink-0 font-bold tabular-nums ${sum ? '' : 'text-slate-400'}`}>{sum ? rupiah(sum) : 'Lunas'}</span>
+        <Icon name="right" className="w-5 h-5 text-slate-400 shrink-0" />
+      </button>
+    );
+  };
+
+  return (
+    <div>
+      <PageHeader title="Bon pelanggan" subtitle="Catatan pelanggan yang bayar belakangan" />
+      {debts.length === 0 ? (
+        <EmptyState icon="book" title="Belum ada bon" text="Kalau ada pelanggan yang bayar belakangan, catat di sini supaya tidak lupa."
+          action={<button className={`${BTN_PRIMARY} w-full`} onClick={() => openAddBon()}><Icon name="plus" className="w-5 h-5" />Tambah bon</button>} />
+      ) : (
+        <div className="pb-24">
+          <div className="p-4">
+            <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4">
+              <div className="text-sm text-amber-900">Total belum dibayar</div>
+              <div className="text-[30px] leading-tight font-extrabold tabular-nums text-amber-950">{rupiah(total)}</div>
+              <div className="text-sm text-amber-900">{open.length ? `dari ${open.length} pelanggan` : 'Semua pelanggan sudah lunas'}</div>
+            </div>
+          </div>
+          {open.length > 0 && (
+            <section>
+              <h2 className="px-4 pb-1 text-sm font-semibold text-slate-500">Belum lunas</h2>
+              <div className="divide-y divide-slate-100 border-y border-slate-100">{open.map(d => <Item key={d.id} d={d} />)}</div>
+            </section>
+          )}
+          {lunas.length > 0 && (
+            <section className="mt-5">
+              <h2 className="px-4 pb-1 text-sm font-semibold text-slate-500">Sudah lunas</h2>
+              <div className="divide-y divide-slate-100 border-y border-slate-100">{lunas.map(d => <Item key={d.id} d={d} />)}</div>
+            </section>
+          )}
+          <div className="fixed bottom-16 inset-x-0 z-20 pointer-events-none">
+            <div className="mx-auto max-w-[420px] px-4 pb-3 pt-6 bg-gradient-to-t from-white via-white/90 to-transparent">
+              <button className={`${BTN_PRIMARY} w-full pointer-events-auto shadow-lg`} onClick={() => openAddBon()}>
+                <Icon name="plus" className="w-5 h-5" />Tambah bon
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BonDetail({ d, go, openAddBon, askLunas }) {
+  if (!d) return null;
+  const sum = debtTotal(d);
+  const items = [...d.items].sort((a, b) => b.date.localeCompare(a.date));
+  const unpaid = items.filter(i => !i.paid), paid = items.filter(i => i.paid);
+  return (
+    <div className="pb-28">
+      <PageHeader title={d.name} subtitle={d.note || 'Pelanggan'} onBack={() => go('bon')} />
+      <div className="p-4">
+        <div className={`rounded-2xl p-4 ${sum ? 'bg-amber-50 border border-amber-200' : 'bg-emerald-50 border border-emerald-200'}`}>
+          <div className="text-sm text-slate-700">{sum ? 'Belum dibayar' : 'Status'}</div>
+          <div className="text-[30px] leading-tight font-extrabold tabular-nums">{sum ? rupiah(sum) : 'Lunas'}</div>
+          {sum > 0 && <div className="text-sm text-slate-700">{unpaid.length} catatan utang</div>}
+        </div>
+      </div>
+
+      {unpaid.length > 0 && (
+        <section>
+          <h2 className="px-4 pb-1 text-sm font-semibold text-slate-500">Rincian utang</h2>
+          <div className="divide-y divide-slate-100 border-y border-slate-100">
+            {unpaid.map(i => (
+              <div key={i.id} className="px-4 py-3 flex justify-between gap-3">
+                <div className="min-w-0"><div className="font-semibold">{i.desc}</div><div className="text-sm text-slate-500">{relDayFull(i.date)}</div></div>
+                <div className="font-bold tabular-nums">{rupiah(i.amount)}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {paid.length > 0 && (
+        <section className="mt-5">
+          <h2 className="px-4 pb-1 text-sm font-semibold text-slate-500">Sudah dibayar</h2>
+          <div className="divide-y divide-slate-100 border-y border-slate-100">
+            {paid.map(i => (
+              <div key={i.id} className="px-4 py-3 flex justify-between gap-3 text-slate-500">
+                <div className="min-w-0"><div className="font-semibold">{i.desc}</div><div className="text-sm">{fmtDate(i.date)} · lunas {i.paidDate ? relLower(i.paidDate) : ''}</div></div>
+                <div className="tabular-nums line-through">{rupiah(i.amount)}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <div className="fixed bottom-16 inset-x-0 z-20">
+        <div className="mx-auto max-w-[420px] bg-white border-t border-slate-200 p-3 grid grid-cols-2 gap-2">
+          <button className={BTN_SECONDARY} onClick={() => openAddBon(d.name)}><Icon name="plus" className="w-5 h-5" />Tambah utang</button>
+          <button className={BTN_PRIMARY} disabled={!sum} onClick={() => askLunas(d)}><Icon name="checkCircle" className="w-5 h-5" />Tandai lunas</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   STOK BAHAN
+   ========================================================= */
+function StockBadge({ status }) {
+  const u = STATUS_UI[status];
+  return (
+    <span className={`inline-flex items-center gap-1 h-6 px-2 rounded-full text-xs font-bold whitespace-nowrap ${u.badge}`}>
+      {status !== 'aman' && <Icon name="alert" className="w-3.5 h-3.5" />}{u.label}
+    </span>
+  );
+}
+
+function StockBar({ s }) {
+  const pct = Math.min(100, (s.qty / Math.max(s.min * 3, 0.01)) * 100);
+  return (
+    <div className="h-2 rounded-full bg-slate-100 overflow-hidden" aria-hidden="true">
+      <div className={`h-full rounded-full ${STATUS_UI[stockStatus(s)].bar}`} style={{ width: `${s.qty > 0 ? Math.max(pct, 4) : 0}%` }} />
+    </div>
+  );
+}
+
+function Stok({ stock, go, setStockModal }) {
+  const sorted = [...stock].sort((a, b) => STATUS_ORDER[stockStatus(a)] - STATUS_ORDER[stockStatus(b)] || a.name.localeCompare(b.name));
+  const low = sorted.filter(s => stockStatus(s) !== 'aman');
+  const addBtn = (
+    <button onClick={() => setStockModal({ type: 'item' })} aria-label="Tambah bahan"
+            className="w-11 h-11 mr-1 rounded-full bg-blue-50 text-blue-700 grid place-items-center hover:bg-blue-100"><Icon name="plus" /></button>
+  );
+  return (
+    <div className="pb-6">
+      <PageHeader title="Stok bahan" subtitle={`${stock.length} bahan dipantau`} onBack={() => go('beranda')} right={addBtn} />
+      {stock.length === 0 ? (
+        <EmptyState icon="box" title="Belum ada bahan" text="Tambahkan bahan yang sering dibeli, seperti tepung atau gas. Nanti kamu diingatkan sebelum habis."
+          action={<button className={`${BTN_PRIMARY} w-full`} onClick={() => setStockModal({ type: 'item' })}><Icon name="plus" className="w-5 h-5" />Tambah bahan</button>} />
+      ) : (
+        <>
+          <div className="p-4 space-y-3">
+            {low.length > 0 ? (
+              <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4 flex gap-3">
+                <Icon name="alert" className="w-6 h-6 text-amber-700 shrink-0" />
+                <div>
+                  <div className="font-bold text-amber-950">{low.length} bahan perlu dibeli</div>
+                  <div className="text-sm text-amber-900">{low.map(s => s.name).join(', ')}</div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl bg-blue-50 border border-blue-200 p-4 flex items-center gap-3">
+                <Icon name="checkCircle" className="w-6 h-6 text-blue-700 shrink-0" />
+                <div className="font-semibold text-blue-950">Semua stok masih aman</div>
+              </div>
+            )}
+            <p className="text-sm text-slate-600">
+              Stok bertambah saat kamu mencatat belanja bahan, dan berkurang kalau kamu ketik <b>“pakai tepung 2kg”</b> di Catat.
+            </p>
+          </div>
+          <div className="divide-y divide-slate-100 border-y border-slate-100">
+            {sorted.map(s => (
+              <button key={s.id} onClick={() => setStockModal({ type: 'detail', itemId: s.id })} className="w-full px-4 py-3.5 text-left hover:bg-slate-50 active:bg-slate-100">
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold truncate">{s.name}</div>
+                    <div className="text-sm text-slate-500">Ingatkan kalau sisa {fmtQty(s.min)} {s.unit}</div>
+                  </div>
+                  <div className="text-right shrink-0 space-y-1">
+                    <div className="font-bold text-lg tabular-nums leading-tight">{fmtQty(s.qty)} <span className="text-sm font-semibold text-slate-500">{s.unit}</span></div>
+                    <StockBadge status={stockStatus(s)} />
+                  </div>
+                </div>
+                <div className="mt-2"><StockBar s={s} /></div>
+              </button>
+            ))}
+          </div>
+          <p className="text-center text-xs text-slate-400 py-4">Ketuk bahan untuk menambah, memakai, atau mengubah</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StockDetail({ item, onAdjust, onEditInfo, onClose }) {
+  return (
+    <Sheet title={item.name} onClose={onClose}>
+      <div className="rounded-2xl bg-slate-50 p-4">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm text-slate-600">Sisa stok</span><StockBadge status={stockStatus(item)} />
+        </div>
+        <div className="text-[32px] leading-tight font-extrabold tabular-nums">{fmtQty(item.qty)} <span className="text-lg font-semibold text-slate-500">{item.unit}</span></div>
+        <div className="mt-2"><StockBar s={item} /></div>
+        <div className="mt-2 text-sm text-slate-600">Diingatkan kalau sisa {fmtQty(item.min)} {item.unit} atau kurang</div>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <button className={BTN_SECONDARY} onClick={() => onAdjust('pakai')}><Icon name="minus" className="w-5 h-5" />Pakai</button>
+        <button className={BTN_PRIMARY} onClick={() => onAdjust('tambah')}><Icon name="plus" className="w-5 h-5" />Tambah stok</button>
+      </div>
+      <h3 className="mt-6 mb-1 text-sm font-semibold text-slate-500">Riwayat stok</h3>
+      {item.history.length === 0 ? <p className="text-slate-500 text-sm py-2">Belum ada perubahan.</p> : (
+        <div className="divide-y divide-slate-100">
+          {item.history.slice(0, 8).map(h => (
+            <div key={h.id} className="py-2.5 flex justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold truncate">{h.note}</div>
+                <div className="text-sm text-slate-500">{relDay(h.date)}, {h.time.replace(':', '.')}</div>
+              </div>
+              <div className="font-bold tabular-nums shrink-0">{h.change > 0 ? '+' : '−'}{fmtQty(Math.abs(h.change))} {item.unit}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <button className={`${BTN_SECONDARY} w-full mt-4`} onClick={onEditInfo}><Icon name="edit" className="w-5 h-5" />Ubah info bahan</button>
+    </Sheet>
+  );
+}
+
+function StockAdjust({ item, mode: initMode, qty: initQty, lockMode, onSave, onClose }) {
+  const [mode, setMode] = useState(initMode || 'tambah');
+  const [q, setQ] = useState(initQty ? String(initQty).replace('.', ',') : '');
+  const [note, setNote] = useState('');
+  const [err, setErr] = useState('');
+  const n = toNum(q);
+  const result = mode === 'tambah' ? item.qty + n : Math.max(0, item.qty - n);
+  const quick = ['kg', 'liter'].includes(item.unit) ? [0.5, 1, 2, 5] : [1, 2, 5, 10];
+  const submit = e => {
+    e.preventDefault();
+    if (!n) return setErr('Isi jumlahnya dulu.');
+    onSave(mode === 'tambah' ? n : -n, note.trim() || (mode === 'tambah' ? 'Tambah stok' : 'Dipakai'));
+    onClose();
+  };
+  return (
+    <Sheet title={mode === 'tambah' ? `Tambah stok ${item.name.toLowerCase()}` : `Pakai ${item.name.toLowerCase()}`} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-5">
+        {!lockMode && (
+          <div className="grid grid-cols-2 gap-2" role="radiogroup">
+            {[['tambah', 'plus', 'Tambah stok'], ['pakai', 'minus', 'Pakai']].map(([k, ic, l]) => (
+              <button type="button" key={k} role="radio" aria-checked={mode === k} onClick={() => setMode(k)}
+                      className={`h-14 rounded-xl border-2 font-semibold flex items-center justify-center gap-2 ${mode === k ? 'border-blue-600 bg-blue-50 text-blue-800' : 'border-slate-200 text-slate-600'}`}>
+                <Icon name={ic} className="w-5 h-5" />{l}
+              </button>
+            ))}
+          </div>
+        )}
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-1.5" htmlFor="stok-jumlah">Jumlah ({item.unit})</label>
+          <div className="relative">
+            <input id="stok-jumlah" className={`${INPUT} pr-20 text-lg font-bold tabular-nums`} inputMode="decimal" placeholder="0" value={q}
+                   onChange={e => { setQ(e.target.value.replace(/[^\d.,]/g, '')); setErr(''); }} />
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 font-semibold text-slate-500">{item.unit}</span>
+          </div>
+          {err && <span className="block text-sm text-rose-700 mt-1">{err}</span>}
+          <div className="flex gap-2 mt-2">
+            {quick.map(v => <Chip key={v} active={n === v} onClick={() => { setQ(String(v).replace('.', ',')); setErr(''); }}>{fmtQty(v)}</Chip>)}
+          </div>
+        </div>
+        <div className="rounded-xl bg-slate-50 p-3 flex items-center justify-between gap-2">
+          <span className="text-sm text-slate-600">Stok {fmtQty(item.qty)} → jadi <b className="text-base text-slate-900">{fmtQty(result)} {item.unit}</b></span>
+          <StockBadge status={stockStatus({ ...item, qty: result })} />
+        </div>
+        {mode === 'pakai' && n > item.qty && <p className="-mt-3 text-sm text-amber-800">Lebih banyak dari stok yang tercatat, jadi stok dihitung 0.</p>}
+        <Field label="Catatan" hint="Boleh dikosongkan">
+          <input className={INPUT} value={note} onChange={e => setNote(e.target.value)} placeholder={mode === 'tambah' ? 'Contoh: beli di pasar' : 'Contoh: untuk adonan pagi'} />
+        </Field>
+        <button type="submit" className={`${BTN_PRIMARY} w-full`}><Icon name="check" className="w-5 h-5" />Simpan</button>
+      </form>
+    </Sheet>
+  );
+}
+
+const UNITS = ['kg', 'liter', 'tabung', 'pak', 'bungkus', 'buah'];
+
+function StockItemForm({ item, onSave, onDelete, onClose }) {
+  const [f, setF] = useState({ name: item ? item.name : '', unit: item ? item.unit : 'kg', qty: '', min: item ? String(item.min).replace('.', ',') : '' });
+  const [err, setErr] = useState({});
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const num = v => v.replace(/[^\d.,]/g, '');
+  const submit = e => {
+    e.preventDefault();
+    const er = {};
+    if (!f.name.trim()) er.name = 'Isi nama bahan.';
+    if (!f.unit.trim()) er.unit = 'Isi satuannya.';
+    setErr(er);
+    if (Object.keys(er).length) return;
+    const data = { name: cap(f.name.trim()), unit: f.unit.trim().toLowerCase(), min: toNum(f.min) };
+    if (!item) data.qty = toNum(f.qty);
+    onSave(data, item && item.id);
+    onClose();
+  };
+  const NumInput = ({ k, label, hint }) => (
+    <Field label={label} hint={hint}>
+      <div className="relative">
+        <input className={`${INPUT} pr-24 tabular-nums`} inputMode="decimal" placeholder="0" value={f[k]} onChange={e => set(k, num(e.target.value))} />
+        <span className="absolute right-4 top-1/2 -translate-y-1/2 font-semibold text-slate-500">{f.unit}</span>
+      </div>
+    </Field>
+  );
+  return (
+    <Sheet title={item ? 'Ubah info bahan' : 'Tambah bahan'} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-5">
+        <Field label="Nama bahan" error={err.name}>
+          <input className={INPUT} value={f.name} onChange={e => set('name', e.target.value)} placeholder="Contoh: Tepung tapioka" />
+        </Field>
+        <div>
+          <span className="block text-sm font-semibold text-slate-700 mb-1.5">Satuan</span>
+          <div className="flex flex-wrap gap-2 mb-2">{UNITS.map(u => <Chip key={u} active={f.unit === u} onClick={() => set('unit', u)}>{u}</Chip>)}</div>
+          <input className={INPUT} value={f.unit} onChange={e => set('unit', e.target.value)} placeholder="Atau tulis sendiri" aria-label="Satuan" />
+          {err.unit && <span className="block text-sm text-rose-700 mt-1">{err.unit}</span>}
+        </div>
+        {!item && NumInput({ k: 'qty', label: 'Stok sekarang', hint: 'Boleh 0 kalau belum ada' })}
+        {NumInput({ k: 'min', label: 'Ingatkan kalau sisa', hint: 'Muncul tanda “Hampir habis” kalau stok sampai di angka ini' })}
+        <div className={`grid gap-2 pt-1 ${item ? 'grid-cols-[auto_1fr]' : 'grid-cols-1'}`}>
+          {item && <button type="button" className={`${BTN_DANGER} px-4`} onClick={onDelete}><Icon name="trash" className="w-5 h-5" />Hapus</button>}
+          <button type="submit" className={BTN_PRIMARY}><Icon name="check" className="w-5 h-5" />Simpan</button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+/* =========================================================
+   PENGATURAN
+   ========================================================= */
+function Pengaturan({ biz, setBiz, user, setUser, cats, setCats, go, onLogout, onClear, onReload, setToast }) {
+  const [editing, setEditing] = useState(false);
+  const [f, setF] = useState({ name: biz.name, type: biz.type, owner: user.name });
+  const [newCat, setNewCat] = useState({ masuk: '', keluar: '' });
+
+  const saveProfile = () => {
+    setBiz({ name: f.name.trim() || biz.name, type: f.type.trim() || biz.type });
+    setUser({ ...user, name: f.owner.trim() || user.name });
+    setEditing(false);
+    setToast('Profil usaha disimpan');
+  };
+  const addCat = type => {
+    const v = newCat[type].trim();
+    if (!v) return;
+    if (cats[type].some(c => c.toLowerCase() === v.toLowerCase())) return setToast('Kategori itu sudah ada');
+    setCats({ ...cats, [type]: [...cats[type], cap(v)] });
+    setNewCat({ ...newCat, [type]: '' });
+  };
+  const removeCat = (type, c) => {
+    if (cats[type].length <= 1) return setToast('Minimal harus ada satu kategori');
+    setCats({ ...cats, [type]: cats[type].filter(x => x !== c) });
+  };
+
+  return (
+    <div className="pb-6">
+      <PageHeader title="Pengaturan" onBack={() => go('beranda')} />
+
+      <section className="p-4">
+        <h2 className="text-sm font-semibold text-slate-500 mb-2">Profil usaha</h2>
+        <div className="rounded-2xl border border-slate-200 p-4">
+          {!editing ? (
+            <>
+              <div className="flex items-center gap-3">
+                <span className="w-12 h-12 rounded-xl bg-blue-50 text-blue-700 grid place-items-center"><Icon name="store" /></span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-lg truncate">{biz.name}</div>
+                  <div className="text-slate-600 text-sm truncate">{biz.type}</div>
+                </div>
+              </div>
+              <dl className="mt-3 text-sm divide-y divide-slate-100">
+                <div className="flex justify-between py-2"><dt className="text-slate-500">Pemilik</dt><dd className="font-semibold">{user.name}</dd></div>
+                <div className="flex justify-between py-2"><dt className="text-slate-500">Nomor HP / email</dt><dd className="font-semibold">{user.contact}</dd></div>
+              </dl>
+              <button className={`${BTN_SECONDARY} w-full mt-2`} onClick={() => { setF({ name: biz.name, type: biz.type, owner: user.name }); setEditing(true); }}>
+                <Icon name="edit" className="w-5 h-5" />Ubah profil
+              </button>
+            </>
+          ) : (
+            <div className="space-y-4">
+              <Field label="Nama usaha"><input className={INPUT} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></Field>
+              <Field label="Jenis usaha"><input className={INPUT} value={f.type} onChange={e => setF({ ...f, type: e.target.value })} list="jenis-usaha" /></Field>
+              <datalist id="jenis-usaha">{BIZ_TYPES.filter(t => t !== 'Lainnya').map(t => <option key={t} value={t} />)}</datalist>
+              <Field label="Nama pemilik"><input className={INPUT} value={f.owner} onChange={e => setF({ ...f, owner: e.target.value })} /></Field>
+              <div className="grid grid-cols-2 gap-2">
+                <button className={BTN_SECONDARY} onClick={() => setEditing(false)}>Batal</button>
+                <button className={BTN_PRIMARY} onClick={saveProfile}>Simpan</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="px-4 pb-4">
+        <h2 className="text-sm font-semibold text-slate-500 mb-2">Daftar kategori</h2>
+        <div className="rounded-2xl border border-slate-200 divide-y divide-slate-100">
+          {[['masuk', 'Untuk uang masuk (+)', 'text-emerald-700'], ['keluar', 'Untuk uang keluar (−)', 'text-rose-700']].map(([type, label, color]) => (
+            <div key={type} className="p-4">
+              <div className={`font-semibold ${color}`}>{label}</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {cats[type].map(c => (
+                  <span key={c} className="h-11 pl-4 pr-1 rounded-full bg-slate-100 text-sm font-semibold text-slate-700 flex items-center gap-1">
+                    {c}
+                    <button onClick={() => removeCat(type, c)} aria-label={`Hapus kategori ${c}`} className="w-9 h-9 grid place-items-center rounded-full hover:bg-slate-200 text-slate-500">
+                      <Icon name="x" className="w-4 h-4" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <form className="mt-3 flex gap-2" onSubmit={e => { e.preventDefault(); addCat(type); }}>
+                <input className={INPUT} value={newCat[type]} onChange={e => setNewCat({ ...newCat, [type]: e.target.value })} placeholder="Kategori baru" aria-label={`Kategori baru ${label}`} />
+                <button type="submit" className={`${BTN_SECONDARY} px-4 shrink-0`}><Icon name="plus" className="w-5 h-5" />Tambah</button>
+              </form>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="px-4 pb-4">
+        <h2 className="text-sm font-semibold text-slate-500 mb-2">Data contoh (khusus prototipe)</h2>
+        <div className="rounded-2xl border border-slate-200 p-4 space-y-2">
+          <p className="text-sm text-slate-600">Kosongkan data untuk melihat tampilan saat belum ada catatan.</p>
+          <div className="grid grid-cols-2 gap-2">
+            <button className={BTN_SECONDARY} onClick={onClear}><Icon name="trash" className="w-5 h-5" />Kosongkan</button>
+            <button className={BTN_SECONDARY} onClick={onReload}><Icon name="refresh" className="w-5 h-5" />Isi ulang</button>
+          </div>
+        </div>
+      </section>
+
+      <div className="px-4">
+        <button className={`${BTN_DANGER} w-full`} onClick={onLogout}><Icon name="logout" className="w-5 h-5" />Keluar dari akun</button>
+        <p className="text-center text-xs text-slate-400 mt-4">Jualans · prototipe v0.1</p>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   Menu bawah
+   ========================================================= */
+function BottomNav({ page, go }) {
+  const active = page === 'bonDetail' ? 'bon' : page;
+  const Item = ({ k, label, icon }) => (
+    <button onClick={() => go(k)} aria-current={active === k ? 'page' : undefined}
+            className={`flex flex-col items-center justify-center gap-0.5 text-xs font-semibold ${active === k ? 'text-blue-700' : 'text-slate-500'}`}>
+      <Icon name={icon} className="w-6 h-6" sw={active === k ? 2.4 : 2} />{label}
+    </button>
+  );
+  return (
+    <nav className="fixed bottom-0 inset-x-0 z-30" aria-label="Menu utama">
+      <div className="mx-auto max-w-[420px] h-16 bg-white border-t border-slate-200 grid grid-cols-4">
+        <Item k="beranda" label="Beranda" icon="home" />
+        <button onClick={() => go('catat')} aria-current={active === 'catat' ? 'page' : undefined}
+                className="flex flex-col items-center justify-end pb-1.5 text-xs font-bold text-blue-700">
+          <span className={`-mt-7 mb-0.5 w-16 h-16 rounded-full grid place-items-center text-white shadow-lg shadow-blue-600/30 ring-4 ring-white ${active === 'catat' ? 'bg-blue-800' : 'bg-blue-600'}`}>
+            <Icon name="chat" className="w-7 h-7" />
+          </span>
+          Catat
+        </button>
+        <Item k="riwayat" label="Riwayat" icon="list" />
+        <Item k="bon" label="Bon" icon="book" />
+      </div>
+    </nav>
+  );
+}
+
+function Toast({ text: raw }) {
+  const { text, warn } = typeof raw === 'string' ? { text: raw } : raw;
+  return (
+    <div className="fixed top-3 inset-x-0 z-[70] flex justify-center px-4 pointer-events-none" role="status">
+      <div className="pop-in max-w-[380px] bg-slate-900 text-white rounded-xl px-4 py-3 text-sm font-semibold shadow-lg flex items-center gap-2">
+        <Icon name={warn ? 'alert' : 'checkCircle'} className={`w-5 h-5 shrink-0 ${warn ? 'text-amber-400' : 'text-emerald-400'}`} />{text}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   Aplikasi setelah login
+   ========================================================= */
+function MainApp(props) {
+  const { user, setUser, biz, setBiz, txs, setTxs, debts, setDebts, cats, setCats, stock, setStock, onLogout, setToast } = props;
+  const [page, setPage] = useState('beranda');
+  const [bonId, setBonId] = useState(null);
+  const [txModal, setTxModal] = useState(null);
+  const [bonModal, setBonModal] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [stockModal, setStockModal] = useState(null);
+  const [messages, setMessages] = useState(initialMessages);
+
+  const go = p => { setPage(p); window.scrollTo(0, 0); };
+
+  // Ubah stok satu bahan; beri peringatan kalau baru saja jadi hampir habis / habis
+  const applyStock = (itemId, change, note, date = todayKey()) => {
+    const s = stock.find(x => x.id === itemId);
+    if (!s) return null;
+    const round = v => Math.max(0, Math.round(v * 100) / 100);
+    const entry = { id: uid(), date, time: nowTime(), change, note };
+    setStock(list => list.map(x => x.id === itemId ? { ...x, qty: round(x.qty + change), history: [entry, ...x.history] } : x));
+    const r = { ...s, qty: round(s.qty + change) };
+    const before = stockStatus(s), after = stockStatus(r);
+    if (after !== before && after !== 'aman') {
+      setTimeout(() => setToast({ warn: true, text: after === 'habis'
+        ? `Stok ${s.name.toLowerCase()} habis. Waktunya belanja!`
+        : `Stok ${s.name.toLowerCase()} tinggal ${fmtQty(r.qty)} ${s.unit}, hampir habis.` }), 1200);
+    }
+    return r;
+  };
+  const saveStockItem = (data, id) => {
+    if (id) {
+      setStock(list => list.map(s => s.id === id ? { ...s, ...data, keywords: data.name !== s.name ? stockKeywords(data.name) : s.keywords } : s));
+      setToast('Info bahan disimpan');
+    } else {
+      const history = data.qty ? [{ id: uid(), date: todayKey(), time: nowTime(), change: data.qty, note: 'Stok awal' }] : [];
+      setStock(list => [...list, { id: uid(), ...data, keywords: stockKeywords(data.name), history }]);
+      setToast(`${data.name} ditambahkan ke stok`);
+    }
+  };
+  const askDeleteStock = item => setConfirm({
+    title: `Hapus ${item.name}?`, danger: true, confirmText: 'Hapus',
+    message: 'Bahan ini dan riwayat stoknya akan dihapus dari daftar.',
+    onConfirm: () => { setStock(l => l.filter(s => s.id !== item.id)); setStockModal(null); setToast('Bahan dihapus'); },
+  });
+
+  const addTx = tx => {
+    const nt = { ...tx, id: uid(), time: tx.time || nowTime() };
+    setTxs(p => [nt, ...p]);
+    if (tx.stock && tx.stock.qty > 0) applyStock(tx.stock.itemId, tx.stock.qty, `Belanja: ${tx.item}`, tx.date);
+    return nt;
+  };
+  const openNewTx = () => setTxModal({ mode: 'new', initial: {}, onSave: f => { const nt = addTx(f); setToast(`Tersimpan ${signed(nt.type, nt.amount)}`); } });
+  const openEditTx = tx => setTxModal({
+    mode: 'edit', initial: tx,
+    onSave: f => { setTxs(p => p.map(x => x.id === tx.id ? { ...x, ...f } : x)); setToast('Perubahan disimpan'); },
+    onDelete: () => setConfirm({
+      title: 'Hapus transaksi ini?', danger: true, confirmText: 'Hapus',
+      message: `${tx.item} (${signed(tx.type, tx.amount)}) akan dihapus dan tidak bisa dikembalikan.`,
+      onConfirm: () => { setTxs(p => p.filter(x => x.id !== tx.id)); setTxModal(null); setToast('Transaksi dihapus'); },
+    }),
+  });
+
+  const saveBon = ({ name, desc, amount, date }) => {
+    const item = { id: uid(), desc, amount, date, paid: false };
+    setDebts(list => {
+      const ex = list.find(d => d.name.toLowerCase() === name.toLowerCase());
+      if (ex) return list.map(d => d === ex ? { ...d, items: [...d.items, item] } : d);
+      return [...list, { id: uid(), name, note: 'Pelanggan', items: [item] }];
+    });
+    setToast(`Bon ${name} ${rupiah(amount)} dicatat`);
+  };
+
+  const askLunas = d => {
+    const sum = debtTotal(d);
+    setConfirm({
+      title: `Tandai lunas?`,
+      message: `Semua utang ${d.name} sebesar ${rupiah(sum)} akan ditandai sudah dibayar.`,
+      confirmText: 'Ya, lunas',
+      checkbox: { label: `Catat juga ${rupiah(sum)} sebagai uang masuk hari ini`, value: true },
+      onConfirm: record => {
+        const t = todayKey();
+        setDebts(list => list.map(x => x.id === d.id ? { ...x, items: x.items.map(i => i.paid ? i : { ...i, paid: true, paidDate: t }) } : x));
+        if (record) addTx({ type: 'masuk', item: `Pelunasan bon ${d.name}`, amount: sum, category: cats.masuk.includes('Pelunasan bon') ? 'Pelunasan bon' : cats.masuk[0], date: t });
+        setToast(`Bon ${d.name} lunas${record ? ` · +${rupiah(sum)}` : ''}`);
+      },
+    });
+  };
+
+  const currentDebt = debts.find(d => d.id === bonId);
+
+  return (
+    <div className="mx-auto max-w-[420px] min-h-screen bg-white pb-16 sm:shadow-xl sm:shadow-slate-300/40">
+      {page === 'beranda' && <Beranda biz={biz} user={user} txs={txs} debts={debts} stock={stock} go={go} openEditTx={openEditTx} openNewTx={openNewTx} />}
+      {page === 'catat' && <Catat messages={messages} setMessages={setMessages} txs={txs} cats={cats} addTx={addTx} setTxModal={setTxModal} go={go}
+                                  stock={stock} applyStock={applyStock} setStockModal={setStockModal} />}
+      {page === 'stok' && <Stok stock={stock} go={go} setStockModal={setStockModal} />}
+      {page === 'riwayat' && <Riwayat txs={txs} cats={cats} openEditTx={openEditTx} openNewTx={openNewTx} go={go} />}
+      {page === 'bon' && <Bon debts={debts} openBon={id => { setBonId(id); go('bonDetail'); }} openAddBon={() => setBonModal({})} />}
+      {page === 'bonDetail' && <BonDetail d={currentDebt} go={go} openAddBon={name => setBonModal({ name })} askLunas={askLunas} />}
+      {page === 'pengaturan' && (
+        <Pengaturan biz={biz} setBiz={setBiz} user={user} setUser={setUser} cats={cats} setCats={setCats} go={go} setToast={setToast}
+          onLogout={() => setConfirm({ title: 'Keluar dari akun?', message: 'Kamu bisa login lagi kapan saja.', confirmText: 'Keluar', danger: true, onConfirm: onLogout })}
+          onClear={() => setConfirm({ title: 'Kosongkan semua data?', message: 'Semua transaksi, bon, dan stok contoh akan dihapus.', confirmText: 'Kosongkan', danger: true,
+            onConfirm: () => { setTxs([]); setDebts([]); setStock([]); setToast('Data dikosongkan'); } })}
+          onReload={() => { setTxs(makeSampleTx()); setDebts(makeSampleDebts()); setStock(makeSampleStock()); setToast('Data contoh diisi ulang'); }} />
+      )}
+
+      <BottomNav page={page} go={go} />
+
+      {txModal && <TxForm key={JSON.stringify(txModal.initial)} modal={txModal} cats={cats} stock={stock} onClose={() => setTxModal(null)} />}
+      {bonModal && <BonForm modal={bonModal} debts={debts} onSave={saveBon} onClose={() => setBonModal(null)} />}
+      {stockModal && (() => {
+        const item = stock.find(s => s.id === stockModal.itemId);
+        const backToDetail = () => setStockModal(item ? { type: 'detail', itemId: item.id } : null);
+        if (stockModal.type === 'item') {
+          return <StockItemForm key={stockModal.itemId || 'baru'} item={item} onSave={saveStockItem} onClose={backToDetail} onDelete={() => askDeleteStock(item)} />;
+        }
+        if (!item) return null;
+        if (stockModal.type === 'detail') {
+          return <StockDetail item={item} onClose={() => setStockModal(null)}
+                   onAdjust={mode => setStockModal({ type: 'adjust', itemId: item.id, mode, back: true })}
+                   onEditInfo={() => setStockModal({ type: 'item', itemId: item.id })} />;
+        }
+        return <StockAdjust key={item.id + stockModal.mode} item={item} mode={stockModal.mode} qty={stockModal.qty} lockMode={stockModal.lockMode}
+                 onClose={() => stockModal.back ? backToDetail() : setStockModal(null)}
+                 onSave={(change, note) => {
+                   const r = applyStock(item.id, change, note);
+                   setToast(`Stok ${item.name.toLowerCase()} jadi ${fmtQty(r.qty)} ${item.unit}`);
+                   if (stockModal.onDone) stockModal.onDone(change, r);
+                 }} />;
+      })()}
+      {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} />}
+    </div>
+  );
+}
+
+/* =========================================================
+   Akar aplikasi
+   ========================================================= */
+function App() {
+  const [screen, setScreen] = useState('landing'); // landing | daftar | setup | login | app
+  const [user, setUser] = useState({ name: 'Rina', contact: '0812-3456-7890' });
+  const [biz, setBiz] = useState({ name: 'Jualans', type: 'Cilok goreng' });
+  const [txs, setTxs] = useState(makeSampleTx);
+  const [debts, setDebts] = useState(makeSampleDebts);
+  const [cats, setCats] = useState(DEFAULT_CATS);
+  const [stock, setStock] = useState(makeSampleStock);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2400);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const go = s => { setScreen(s); window.scrollTo(0, 0); };
+
+  return (
+    <>
+      {screen === 'landing' && <Landing go={go} />}
+      {screen === 'daftar' && <Register go={go} setUser={setUser} />}
+      {screen === 'setup' && <Setup biz={biz} setBiz={setBiz} user={user} onDone={() => go('app')} />}
+      {screen === 'login' && <Login go={go} onLogin={() => go('app')} setToast={setToast} />}
+      {screen === 'app' && (
+        <MainApp user={user} setUser={setUser} biz={biz} setBiz={setBiz} txs={txs} setTxs={setTxs}
+                 debts={debts} setDebts={setDebts} cats={cats} setCats={setCats} stock={stock} setStock={setStock} setToast={setToast}
+                 onLogout={() => go('landing')} />
+      )}
+      {toast && <Toast text={toast} />}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
